@@ -17,10 +17,10 @@ class Car:
         self,
         position: tuple[float, float] = (400, 300),
         angle: float = 0.0,
-        max_speed: float = 8.0,
-        acceleration: float = 0.3,
-        brake_deceleration: float = 0.3,
-        turn_rate: float = 0.08,
+        max_speed: float = 250.0,
+        acceleration: float = 150.0,
+        brake_deceleration: float = 150.0,
+        turn_rate: float = 4.5,
         sensor_range: float = 200.0,
         radius: float = 12.0,
         length: float = 24.0,
@@ -41,9 +41,8 @@ class Car:
     def get_sensor_distances(self, track: Track) -> list[float]:
         """Cast 5 rays and return distance to nearest boundary for each."""
         cx, cy = self.position
-        front_offset = self.length / 2
-        ray_start_x = cx + math.cos(self.angle) * front_offset
-        ray_start_y = cy + math.sin(self.angle) * front_offset
+        ray_start_x = cx
+        ray_start_y = cy
 
         distances = []
         for deg in SENSOR_ANGLES:
@@ -97,48 +96,47 @@ class Car:
         self.fitness = 0.0
         self.is_alive = True
 
-    def render(self, body_color=colors.RED) -> None:
-        """Draw the car and sensor rays."""
+    def render(
+        self,
+        body_color=colors.RED,
+        *,
+        show_sensors: bool = True,
+        sensor_distances: list[float] | None = None,
+    ) -> None:
+        """Draw the car and optional sensor rays to actual hit distances."""
+        if not self.is_alive:
+            return
+
         cx, cy = self.position
-        front_offset = self.length / 2
 
-        for deg in SENSOR_ANGLES:
-            rad = math.radians(deg) + self.angle
-            ray_start_x = cx + math.cos(self.angle) * front_offset
-            ray_start_y = cy + math.sin(self.angle) * front_offset
-            ray_end_x = ray_start_x + math.cos(rad) * self.sensor_range
-            ray_end_y = ray_start_y + math.sin(rad) * self.sensor_range
-            rl.DrawLineV(
-                [ray_start_x, ray_start_y],
-                [ray_end_x, ray_end_y],
-                colors.YELLOW,
-            )
+        if show_sensors and sensor_distances is not None:
+            for i, deg in enumerate(SENSOR_ANGLES):
+                dist = sensor_distances[i]
+                rad = math.radians(deg) + self.angle
+                ray_start_x = cx
+                ray_start_y = cy
+                ray_end_x = ray_start_x + math.cos(rad) * dist
+                ray_end_y = ray_start_y + math.sin(rad) * dist
+                rl.DrawLineV(
+                    [ray_start_x, ray_start_y],
+                    [ray_end_x, ray_end_y],
+                    colors.YELLOW,
+                )
 
-        half_len = self.length / 2
-        half_w = self.radius
-        corners = [
-            (half_len, -half_w),
-            (half_len, half_w),
-            (-half_len, half_w),
-            (-half_len, -half_w),
-        ]
-        cos_a = math.cos(self.angle)
-        sin_a = math.sin(self.angle)
-        world_corners = []
-        for dx, dy in corners:
-            rx = dx * cos_a - dy * sin_a + cx
-            ry = dx * sin_a + dy * cos_a + cy
-            world_corners.append([rx, ry])
-
-        rl.DrawTriangle(
-            world_corners[0],
-            world_corners[1],
-            world_corners[2],
-            body_color,
+        width = 20.0
+        height = 10.0
+        rect = ffi.new(
+            "struct Rectangle *",
+            {
+                "x": float(cx - width / 2),
+                "y": float(cy - height / 2),
+                "width": float(width),
+                "height": float(height),
+            },
         )
-        rl.DrawTriangle(
-            world_corners[0],
-            world_corners[2],
-            world_corners[3],
-            body_color,
+        origin = ffi.new(
+            "struct Vector2 *",
+            {"x": float(width / 2), "y": float(height / 2)},
         )
+        rotation_deg = float(self.angle * 180.0 / math.pi)
+        rl.DrawRectanglePro(rect[0], origin[0], rotation_deg, body_color)

@@ -16,8 +16,8 @@ HIDDEN_DIM = 16
 
 def mutate_state_dict(
     state_dict: dict[str, torch.Tensor],
-    mutation_rate: float = 0.05,
-    noise_scale: float = 0.1,
+    mutation_rate: float = 0.15,
+    noise_scale: float = 0.2,
 ) -> dict[str, torch.Tensor]:
     """Clone state dict and add Gaussian noise to a random subset of parameters."""
     out: dict[str, torch.Tensor] = {}
@@ -57,13 +57,13 @@ class PopulationManager:
 
     def __init__(
         self,
-        population_size: int = 50,
+        population_size: int = 100,
         elite_fraction: float = 0.1,
         spawn_position: tuple[float, float] = (400, 150),
         spawn_angle: float = 0.0,
         car_kwargs: dict[str, Any] | None = None,
-        mutation_rate: float = 0.05,
-        noise_scale: float = 0.1,
+        mutation_rate: float = 0.15,
+        noise_scale: float = 0.2,
     ):
         self.population_size = population_size
         self.elite_fraction = elite_fraction
@@ -112,7 +112,11 @@ class PopulationManager:
             )
             self.brains[i].load_state_dict(mutated)
 
-        for car in self.cars:
-            car.reset(self.spawn_position, self.spawn_angle)
+        for i in range(self.population_size):
+            if i in self.elite_indices:
+                self.cars[i].reset(self.spawn_position, self.spawn_angle)
+            else:
+                jitter = random.uniform(-0.2, 0.2)
+                self.cars[i].reset(self.spawn_position, self.spawn_angle + jitter)
 
         return best_fitness
