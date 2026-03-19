@@ -1,6 +1,6 @@
 # NeuroDrift
 
-A custom 2D driving environment built with Raylib, where a PyTorch-powered neural network learns to navigate the track and avoid collisions using reinforcement learning.
+A custom 2D driving environment built with Raylib, where a population of small PyTorch MLPs evolves via a genetic algorithm (neuroevolution) to navigate the track and avoid collisions.
 
 ## Setup
 

@@ -19,6 +19,7 @@ class Car:
         angle: float = 0.0,
         max_speed: float = 8.0,
         acceleration: float = 0.3,
+        brake_deceleration: float = 0.3,
         turn_rate: float = 0.08,
         sensor_range: float = 200.0,
         radius: float = 12.0,
@@ -29,10 +30,13 @@ class Car:
         self.velocity = 0.0
         self.max_speed = max_speed
         self.acceleration = acceleration
+        self.brake_deceleration = brake_deceleration
         self.turn_rate = turn_rate
         self.sensor_range = sensor_range
         self.radius = radius
         self.length = length
+        self.fitness = 0.0
+        self.is_alive = True
 
     def get_sensor_distances(self, track: Track) -> list[float]:
         """Cast 5 rays and return distance to nearest boundary for each."""
@@ -68,14 +72,20 @@ class Car:
         return distances
 
     def apply_action(self, action: int, dt: float = 1.0 / 60.0) -> None:
-        """Apply discrete action: 0=left+accel, 1=straight+accel, 2=right+accel."""
-        if action == 0:
-            self.angle -= self.turn_rate
-        elif action == 2:
-            self.angle += self.turn_rate
-        # action 1: straight, no steering change
+        """Apply discrete action: accel/brake combined with left, straight, or right."""
+        if not self.is_alive:
+            return
 
-        self.velocity = min(self.velocity + self.acceleration, self.max_speed)
+        if action in (0, 3):
+            self.angle -= self.turn_rate
+        elif action in (2, 5):
+            self.angle += self.turn_rate
+
+        if action <= 2:
+            self.velocity = min(self.velocity + self.acceleration, self.max_speed)
+        else:
+            self.velocity = max(self.velocity - self.brake_deceleration, 0.0)
+
         self.position[0] += self.velocity * math.cos(self.angle) * dt
         self.position[1] += self.velocity * math.sin(self.angle) * dt
 
@@ -84,14 +94,15 @@ class Car:
         self.position = list(position)
         self.angle = angle
         self.velocity = 0.0
+        self.fitness = 0.0
+        self.is_alive = True
 
-    def render(self) -> None:
+    def render(self, body_color=colors.RED) -> None:
         """Draw the car and sensor rays."""
         cx, cy = self.position
         front_offset = self.length / 2
 
-        # Draw sensor rays
-        for i, deg in enumerate(SENSOR_ANGLES):
+        for deg in SENSOR_ANGLES:
             rad = math.radians(deg) + self.angle
             ray_start_x = cx + math.cos(self.angle) * front_offset
             ray_start_y = cy + math.sin(self.angle) * front_offset
@@ -103,7 +114,6 @@ class Car:
                 colors.YELLOW,
             )
 
-        # Draw car as rotated rectangle
         half_len = self.length / 2
         half_w = self.radius
         corners = [
@@ -120,16 +130,15 @@ class Car:
             ry = dx * sin_a + dy * cos_a + cy
             world_corners.append([rx, ry])
 
-        # Draw as filled polygon (triangle strip for rect)
         rl.DrawTriangle(
             world_corners[0],
             world_corners[1],
             world_corners[2],
-            colors.RED,
+            body_color,
         )
         rl.DrawTriangle(
             world_corners[0],
             world_corners[2],
             world_corners[3],
-            colors.RED,
+            body_color,
         )

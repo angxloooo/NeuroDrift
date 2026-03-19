@@ -1,8 +1,8 @@
-"""NeuroDrift - 2D autonomous driving RL simulation."""
+"""NeuroDrift - 2D autonomous driving neuroevolution simulation."""
 
 from .car import Car
+from .ga_agent import Brain, PopulationManager
 from .track import Track
-from .dqn_agent import DQNAgent, ReplayBuffer
 from .simulation import Simulation
 
-__all__ = ["Car", "Track", "DQNAgent", "ReplayBuffer", "Simulation"]
+__all__ = ["Car", "Track", "Brain", "PopulationManager", "Simulation"]
