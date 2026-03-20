@@ -10,17 +10,17 @@ from .ga_agent import PopulationManager
 from .track import Track
 
 
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
+SCREEN_WIDTH = 1200
+SCREEN_HEIGHT = 800
 FPS = 60
 DT = 1.0 / FPS
 SENSOR_RANGE = 200.0
 MAX_SPEED = 250.0
-SPAWN_POS = (400, 80)
+SPAWN_POS = (750, 180)
 MAX_GENERATION_STEPS = 2500
 POPULATION_SIZE = 100
 
-_ELITE_COLOR = getattr(colors, "GOLD", (255, 215, 0, 255))
+_ELITE_COLOR = getattr(colors, "WHITE", (255, 255, 255, 255))
 FITNESS_HUE_MAX = 0.65
 
 
@@ -43,31 +43,107 @@ def get_fitness_color(
     return (r, g, b, 255)
 
 
-def _draw_fitness_color_key(x: int, y: int) -> None:
-    """HUD legend: HSV fitness scale (red=low, blue=high) matches get_fitness_color."""
-    title = b"Fitness color (this generation)"
-    rl.DrawText(title, x, y, 12, colors.LIGHTGRAY)
-    bar_x = x
-    bar_y = y + 16
-    bar_w = 200
+def _draw_sidebar_separator(x: int, y: int, width: int) -> None:
+    rl.DrawLine(x, y, x + width, y, colors.GRAY)
+
+
+def _draw_fitness_gradient_block(x: int, y: int, bar_w: int = 280) -> int:
+    """Draw HSV fitness gradient + labels; returns y after block."""
+    rl.DrawText(
+        b"HSV gradient: red (low) -> blue (high) vs gen min/max",
+        x,
+        y,
+        12,
+        colors.LIGHTGRAY,
+    )
+    bar_y = y + 22
     bar_h = 14
     for i in range(bar_w):
         t = i / max(1, bar_w - 1)
         hue = t * FITNESS_HUE_MAX
         rf, gf, bf = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
         seg = (int(rf * 255), int(gf * 255), int(bf * 255), 255)
-        rl.DrawRectangle(bar_x + i, bar_y, 1, bar_h, seg)
-    rl.DrawRectangleLines(bar_x, bar_y, bar_w, bar_h, colors.RAYWHITE)
-    sub_y = bar_y + bar_h + 4
-    rl.DrawText(b"Worse (low fitness)", bar_x, sub_y, 10, colors.WHITE)
-    rl.DrawText(b"Better (high fitness)", bar_x + bar_w - 118, sub_y, 10, colors.WHITE)
+        rl.DrawRectangle(x + i, bar_y, 1, bar_h, seg)
+    rl.DrawRectangleLines(x, bar_y, bar_w, bar_h, colors.RAYWHITE)
+    sub_y = bar_y + bar_h + 6
+    rl.DrawText(b"Worse (low fitness)", x, sub_y, 11, colors.WHITE)
     rl.DrawText(
-        b"Gold cars = elite from previous gen",
-        bar_x,
-        sub_y + 14,
-        10,
-        _ELITE_COLOR,
+        b"Better (high fitness)",
+        x + bar_w - 130,
+        sub_y,
+        11,
+        colors.WHITE,
     )
+    return sub_y + 28
+
+
+def _draw_ui_sidebar(
+    *,
+    generation: int,
+    alive: int,
+    population_size: int,
+    best_fitness: float,
+    steps_left: int,
+    max_steps: int,
+    show_sensors: bool,
+    show_checkpoints: bool,
+) -> None:
+    """Left column UI: title, stats, controls, color legend."""
+    x = 30
+    sep_w = 320
+    y = 40
+
+    rl.DrawText(b"NEURODRIFT AI", x, y, 30, colors.ORANGE)
+    y += 45
+    _draw_sidebar_separator(x, y, sep_w)
+    y += 35
+
+    rl.DrawText(f"Generation: {generation}".encode(), x, y, 18, colors.RAYWHITE)
+    y += 35
+    rl.DrawText(
+        f"Alive: {alive}/{population_size}".encode(),
+        x,
+        y,
+        18,
+        colors.RAYWHITE,
+    )
+    y += 35
+    rl.DrawText(
+        f"Best Fitness (Last Gen): {best_fitness:.0f}".encode(),
+        x,
+        y,
+        18,
+        colors.RAYWHITE,
+    )
+    y += 35
+    rl.DrawText(
+        f"Steps Left: {steps_left} / {max_steps}".encode(),
+        x,
+        y,
+        18,
+        colors.RAYWHITE,
+    )
+    y += 35
+    _draw_sidebar_separator(x, y, sep_w)
+    y += 35
+
+    rl.DrawText(b"Controls:", x, y, 18, colors.SKYBLUE)
+    y += 35
+    s_on = "ON" if show_sensors else "OFF"
+    rl.DrawText(f"[S] - Toggle Sensors ({s_on})".encode(), x, y, 16, colors.LIGHTGRAY)
+    y += 35
+    c_on = "ON" if show_checkpoints else "OFF"
+    rl.DrawText(f"[C] - Toggle Checkpoints ({c_on})".encode(), x, y, 16, colors.LIGHTGRAY)
+    y += 35
+    _draw_sidebar_separator(x, y, sep_w)
+    y += 35
+
+    rl.DrawText(b"Colors:", x, y, 18, colors.SKYBLUE)
+    y += 35
+    rl.DrawText(b"White - Elite Carryover", x, y, 16, _ELITE_COLOR)
+    y += 35
+    y = _draw_fitness_gradient_block(x, y)
+    rl.DrawFPS(x, SCREEN_HEIGHT - 30)
 
 
 def _process_checkpoint_crossing(
@@ -126,12 +202,13 @@ class Simulation:
         self, sensor_distances: list[float], car: Car
     ) -> list[float]:
         normalized_sensors = [d / SENSOR_RANGE for d in sensor_distances]
-        normalized_speed = car.velocity / MAX_SPEED
+        denom = max(car.base_max_speed, 1e-6)
+        normalized_speed = car.velocity / denom
         return normalized_sensors + [normalized_speed]
 
     def run(self) -> None:
         rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, b"NeuroDrift")
-        rl.SetTargetFPS(FPS)
+        rl.SetTargetFPS(60)
 
         self.show_checkpoints = False
 
@@ -156,9 +233,12 @@ class Simulation:
                     logits = brain(state_tensor)
                     action = int(logits.argmax(dim=-1).item())
 
+                safe_position = list(car.position)
                 old_x = float(car.position[0])
                 old_y = float(car.position[1])
                 car.apply_action(action, dt=DT)
+                car.fitness += (car.velocity * DT) * 0.5
+
                 _process_checkpoint_crossing(
                     car, self.track, old_x, old_y, collision_pt
                 )
@@ -168,7 +248,18 @@ class Simulation:
                     car.radius,
                 )
                 if hit:
-                    car.is_alive = False
+                    car.position = list(safe_position)
+                    car.velocity *= 0.5
+                    car.is_touching_wall = True
+                    car.active_max_speed = car.base_max_speed * 0.5
+                    car.active_acceleration = car.base_acceleration * 0.5
+                    if car.velocity > car.active_max_speed:
+                        car.velocity = car.active_max_speed
+                    car.fitness -= 2.0
+                else:
+                    car.is_touching_wall = False
+                    car.active_max_speed = car.base_max_speed
+                    car.active_acceleration = car.base_acceleration
 
             self.generation_step += 1
             if self.generation_step >= MAX_GENERATION_STEPS:
@@ -214,30 +305,17 @@ class Simulation:
                         show_sensors=self.show_sensors,
                         sensor_distances=render_distances,
                     )
-            rl.DrawFPS(10, 10)
-            rl.DrawText(f"Gen: {self.generation}".encode(), 10, 35, 16, colors.WHITE)
-            rl.DrawText(f"Alive: {alive}/{len(self.population.cars)}".encode(), 10, 55, 16, colors.WHITE)
-            rl.DrawText(
-                f"Best (last): {self.last_gen_best_fitness:.0f}".encode(),
-                10,
-                75,
-                16,
-                colors.WHITE,
-            )
             steps_left = max(0, MAX_GENERATION_STEPS - self.generation_step)
-            rl.DrawText(
-                f"Steps left: {steps_left}".encode(),
-                10,
-                95,
-                16,
-                colors.WHITE,
+            _draw_ui_sidebar(
+                generation=self.generation,
+                alive=alive,
+                population_size=len(self.population.cars),
+                best_fitness=self.last_gen_best_fitness,
+                steps_left=steps_left,
+                max_steps=MAX_GENERATION_STEPS,
+                show_sensors=self.show_sensors,
+                show_checkpoints=self.show_checkpoints,
             )
-            sensors_txt = "Sensors: ON" if self.show_sensors else "Sensors: OFF"
-            rl.DrawText(sensors_txt.encode(), 10, 115, 16, colors.WHITE)
-            ck_txt = "Checkpoints: ON" if self.show_checkpoints else "Checkpoints: OFF"
-            rl.DrawText(ck_txt.encode(), 10, 135, 16, colors.WHITE)
-            rl.DrawText(b"S - Toggle sensors | C - Toggle checkpoints", 10, 155, 14, colors.LIGHTGRAY)
-            _draw_fitness_color_key(SCREEN_WIDTH - 220, 10)
             rl.EndDrawing()
 
         rl.CloseWindow()

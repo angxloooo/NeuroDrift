@@ -18,8 +18,8 @@ class Car:
         position: tuple[float, float] = (400, 300),
         angle: float = 0.0,
         max_speed: float = 250.0,
-        acceleration: float = 150.0,
-        brake_deceleration: float = 150.0,
+        acceleration: float = 600.0,
+        brake_deceleration: float = 800.0,
         turn_rate: float = 1.8,
         sensor_range: float = 200.0,
         radius: float = 12.0,
@@ -29,9 +29,12 @@ class Car:
         self.position = list(position)
         self.angle = angle
         self.velocity = 0.0
-        self.max_speed = max_speed
-        self.acceleration = acceleration
+        self.base_max_speed = max_speed
+        self.base_acceleration = acceleration
         self.brake_deceleration = brake_deceleration
+        self.active_max_speed = max_speed
+        self.active_acceleration = acceleration
+        self.is_touching_wall = False
         self.turn_rate = turn_rate
         self.sensor_range = sensor_range
         self.radius = radius
@@ -85,9 +88,15 @@ class Car:
             self.angle += self.turn_rate * dt
 
         if action <= 2:
-            self.velocity = min(self.velocity + self.acceleration, self.max_speed)
+            self.velocity = min(
+                self.velocity + self.active_acceleration * dt,
+                self.active_max_speed,
+            )
         else:
-            self.velocity = max(self.velocity - self.brake_deceleration, 0.0)
+            self.velocity = max(
+                self.velocity - self.brake_deceleration * dt,
+                0.0,
+            )
 
         self.position[0] += self.velocity * math.cos(self.angle) * dt
         self.position[1] += self.velocity * math.sin(self.angle) * dt
@@ -99,6 +108,9 @@ class Car:
         self.velocity = 0.0
         self.fitness = 0.0
         self.is_alive = True
+        self.is_touching_wall = False
+        self.active_max_speed = self.base_max_speed
+        self.active_acceleration = self.base_acceleration
         self.target_checkpoint = self._default_target_checkpoint
         self.laps = 0
 

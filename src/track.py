@@ -9,7 +9,7 @@ class Track:
 
     def __init__(
         self,
-        center: tuple[float, float] = (400, 300),
+        center: tuple[float, float] = (750, 400),
         outer_rx: float = 350.0,
         outer_ry: float = 250.0,
         inner_rx: float = 250.0,
