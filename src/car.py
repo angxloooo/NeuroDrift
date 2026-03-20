@@ -20,10 +20,11 @@ class Car:
         max_speed: float = 250.0,
         acceleration: float = 150.0,
         brake_deceleration: float = 150.0,
-        turn_rate: float = 4.5,
+        turn_rate: float = 1.8,
         sensor_range: float = 200.0,
         radius: float = 12.0,
         length: float = 24.0,
+        spawn_target_checkpoint: int = 0,
     ):
         self.position = list(position)
         self.angle = angle
@@ -37,6 +38,9 @@ class Car:
         self.length = length
         self.fitness = 0.0
         self.is_alive = True
+        self._default_target_checkpoint = spawn_target_checkpoint
+        self.target_checkpoint = spawn_target_checkpoint
+        self.laps = 0
 
     def get_sensor_distances(self, track: Track) -> list[float]:
         """Cast 5 rays and return distance to nearest boundary for each."""
@@ -76,9 +80,9 @@ class Car:
             return
 
         if action in (0, 3):
-            self.angle -= self.turn_rate
+            self.angle -= self.turn_rate * dt
         elif action in (2, 5):
-            self.angle += self.turn_rate
+            self.angle += self.turn_rate * dt
 
         if action <= 2:
             self.velocity = min(self.velocity + self.acceleration, self.max_speed)
@@ -95,6 +99,8 @@ class Car:
         self.velocity = 0.0
         self.fitness = 0.0
         self.is_alive = True
+        self.target_checkpoint = self._default_target_checkpoint
+        self.laps = 0
 
     def render(
         self,

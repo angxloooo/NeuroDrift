@@ -3,7 +3,7 @@
 import colorsys
 
 import torch
-from raylib import rl, colors
+from raylib import ffi, rl, colors
 
 from .car import Car
 from .ga_agent import PopulationManager
@@ -70,14 +70,45 @@ def _draw_fitness_color_key(x: int, y: int) -> None:
     )
 
 
+def _process_checkpoint_crossing(
+    car: Car,
+    track: Track,
+    old_x: float,
+    old_y: float,
+    collision_point,
+) -> None:
+    """Award fitness when movement segment crosses the car's next checkpoint (sequential)."""
+    n_ck = len(track.checkpoints)
+    if n_ck == 0 or not car.is_alive:
+        return
+    move_start = [old_x, old_y]
+    move_end = [float(car.position[0]), float(car.position[1])]
+    while True:
+        p1, p2 = track.checkpoints[car.target_checkpoint]
+        seg_start = [float(p1[0]), float(p1[1])]
+        seg_end = [float(p2[0]), float(p2[1])]
+        if not rl.CheckCollisionLines(
+            move_start, move_end, seg_start, seg_end, collision_point
+        ):
+            break
+        car.fitness += 1000.0
+        car.target_checkpoint += 1
+        if car.target_checkpoint >= n_ck:
+            car.target_checkpoint = 0
+            car.laps += 1
+            car.fitness += 5000.0
+
+
 class Simulation:
     """Main simulation loop: multi-car population and genetic evolution."""
 
     def __init__(self):
         self.track = Track()
+        start_ck = (3 * self.track.num_segments) // 4
         car_kwargs = {
             "max_speed": MAX_SPEED,
             "sensor_range": SENSOR_RANGE,
+            "spawn_target_checkpoint": start_ck,
         }
         self.population = PopulationManager(
             population_size=POPULATION_SIZE,
@@ -102,10 +133,15 @@ class Simulation:
         rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, b"NeuroDrift")
         rl.SetTargetFPS(FPS)
 
+        self.show_checkpoints = False
+
         while not rl.WindowShouldClose():
             if rl.IsKeyPressed(rl.KEY_S):
                 self.show_sensors = not self.show_sensors
+            if rl.IsKeyPressed(rl.KEY_C):
+                self.show_checkpoints = not self.show_checkpoints
 
+            collision_pt = ffi.new("struct Vector2 *")
             all_dead = True
             for idx, car in enumerate(self.population.cars):
                 if not car.is_alive:
@@ -120,8 +156,12 @@ class Simulation:
                     logits = brain(state_tensor)
                     action = int(logits.argmax(dim=-1).item())
 
+                old_x = float(car.position[0])
+                old_y = float(car.position[1])
                 car.apply_action(action, dt=DT)
-                car.fitness += car.velocity * DT
+                _process_checkpoint_crossing(
+                    car, self.track, old_x, old_y, collision_pt
+                )
 
                 hit = self.track.check_car_collision(
                     (car.position[0], car.position[1]),
@@ -154,6 +194,8 @@ class Simulation:
             rl.BeginDrawing()
             rl.ClearBackground(colors.DARKGRAY)
             self.track.render()
+            if self.show_checkpoints:
+                self.track.render_checkpoints()
             for idx, car in enumerate(self.population.cars):
                 if car.is_alive:
                     render_distances = (
@@ -192,6 +234,9 @@ class Simulation:
             )
             sensors_txt = "Sensors: ON" if self.show_sensors else "Sensors: OFF"
             rl.DrawText(sensors_txt.encode(), 10, 115, 16, colors.WHITE)
+            ck_txt = "Checkpoints: ON" if self.show_checkpoints else "Checkpoints: OFF"
+            rl.DrawText(ck_txt.encode(), 10, 135, 16, colors.WHITE)
+            rl.DrawText(b"S - Toggle sensors | C - Toggle checkpoints", 10, 155, 14, colors.LIGHTGRAY)
             _draw_fitness_color_key(SCREEN_WIDTH - 220, 10)
             rl.EndDrawing()
 

@@ -23,6 +23,23 @@ class Track:
         self.inner_ry = inner_ry
         self.num_segments = num_segments
         self._boundary_segments = self._build_boundary_segments()
+        self.checkpoints = self._build_checkpoints()
+
+    def _build_checkpoints(
+        self,
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Radial segments from inner to outer ellipse at each angle step (race order)."""
+        cx, cy = self.center
+        n = self.num_segments
+        cks: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        for i in range(n):
+            a = 2.0 * math.pi * i / n
+            ix = cx + self.inner_rx * math.cos(a)
+            iy = cy + self.inner_ry * math.sin(a)
+            ox = cx + self.outer_rx * math.cos(a)
+            oy = cy + self.outer_ry * math.sin(a)
+            cks.append(((ix, iy), (ox, oy)))
+        return cks
 
     def _ellipse_segments(
         self,
@@ -74,3 +91,11 @@ class Track:
             start = [float(p1[0]), float(p1[1])]
             end = [float(p2[0]), float(p2[1])]
             rl.DrawLineEx(start, end, line_thick, line_color)
+
+    def render_checkpoints(self) -> None:
+        """Debug: draw radial checkpoint segments."""
+        ck_color = getattr(colors, "SKYBLUE", getattr(colors, "BLUE", (102, 191, 255, 255)))
+        for (p1, p2) in self.checkpoints:
+            start = [float(p1[0]), float(p1[1])]
+            end = [float(p2[0]), float(p2[1])]
+            rl.DrawLineV(start, end, ck_color)
