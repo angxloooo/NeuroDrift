@@ -16,7 +16,6 @@ FPS = 60
 DT = 1.0 / FPS
 SENSOR_RANGE = 200.0
 MAX_SPEED = 250.0
-SPAWN_POS = (750, 180)
 MAX_GENERATION_STEPS = 2500
 POPULATION_SIZE = 100
 
@@ -81,6 +80,7 @@ def _draw_ui_sidebar(
     *,
     generation: int,
     population_size: int,
+    track_shape: int,
     best_fitness: float,
     steps_left: int,
     max_steps: int,
@@ -101,6 +101,14 @@ def _draw_ui_sidebar(
     y += 35
     rl.DrawText(
         f"Population: {population_size}".encode(),
+        x,
+        y,
+        18,
+        colors.RAYWHITE,
+    )
+    y += 35
+    rl.DrawText(
+        f"Track Mode: {track_shape}".encode(),
         x,
         y,
         18,
@@ -179,17 +187,18 @@ class Simulation:
 
     def __init__(self):
         self.track = Track()
-        start_ck = (3 * self.track.num_segments) // 4
+        self.start_ck = (3 * self.track.num_segments) // 4
+        spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
         car_kwargs = {
             "max_speed": MAX_SPEED,
             "sensor_range": SENSOR_RANGE,
-            "spawn_target_checkpoint": start_ck,
+            "spawn_target_checkpoint": self.start_ck,
         }
         self.population = PopulationManager(
             population_size=POPULATION_SIZE,
             elite_fraction=0.1,
-            spawn_position=SPAWN_POS,
-            spawn_angle=0.0,
+            spawn_position=spawn_pos,
+            spawn_angle=spawn_angle,
             car_kwargs=car_kwargs,
         )
         self.generation = 1
@@ -242,10 +251,7 @@ class Simulation:
                     car, self.track, old_x, old_y, collision_pt
                 )
 
-                hit = self.track.check_car_collision(
-                    (car.position[0], car.position[1]),
-                    car.radius,
-                )
+                hit = self.track.check_car_collision(car)
                 if hit:
                     car.position = list(safe_position)
                     car.velocity *= 0.5
@@ -268,7 +274,12 @@ class Simulation:
                 all_dead = True
 
             if all_dead:
-                self.last_gen_best_fitness = self.population.evolve_and_reset()
+                if self.generation % 10 == 0:
+                    self.track.cycle_shape()
+                spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
+                self.last_gen_best_fitness = self.population.evolve_and_reset(
+                    spawn_pos, spawn_angle
+                )
                 self.generation += 1
                 self.generation_step = 0
                 print(
@@ -301,6 +312,7 @@ class Simulation:
             _draw_ui_sidebar(
                 generation=self.generation,
                 population_size=len(self.population.cars),
+                track_shape=self.track.current_shape,
                 best_fitness=self.last_gen_best_fitness,
                 steps_left=steps_left,
                 max_steps=MAX_GENERATION_STEPS,

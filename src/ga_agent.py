@@ -102,8 +102,16 @@ class PopulationManager:
             )
             self.brains.append(Brain())
 
-    def evolve_and_reset(self) -> float:
+    def evolve_and_reset(
+        self,
+        spawn_position: tuple[float, float] | None = None,
+        spawn_angle: float | None = None,
+    ) -> float:
         """Sort by fitness; elites unchanged; others from two-parent crossover + mutation."""
+        if spawn_position is not None:
+            self.spawn_position = spawn_position
+        if spawn_angle is not None:
+            self.spawn_angle = spawn_angle
         indexed = [(i, self.cars[i].fitness) for i in range(self.population_size)]
         indexed.sort(key=lambda t: (-t[1], t[0]))
         ranked_indices = [i for i, _ in indexed]
