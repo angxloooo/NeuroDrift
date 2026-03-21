@@ -6,11 +6,11 @@ import torch
 from raylib import ffi, rl, colors
 
 from .car import Car
-from .ga_agent import PopulationManager
+from .ga_agent import HIDDEN_DIM, PopulationManager
 from .track import Track
 
 
-SCREEN_WIDTH = 1200
+SCREEN_WIDTH = 1450
 SCREEN_HEIGHT = 800
 FPS = 60
 DT = 1.0 / FPS
@@ -137,17 +137,17 @@ def _draw_ui_sidebar(
     rl.DrawText(b"Controls:", x, y, 18, colors.SKYBLUE)
     y += 35
     s_on = "ON" if show_sensors else "OFF"
-    rl.DrawText(f"[S] - Toggle Sensors ({s_on})".encode(), x, y, 16, colors.LIGHTGRAY)
+    rl.DrawText(f"[S] - Toggle Sensors ({s_on})".encode(), x, y, 16, colors.RAYWHITE)
     y += 35
     c_on = "ON" if show_checkpoints else "OFF"
-    rl.DrawText(f"[C] - Toggle Checkpoints ({c_on})".encode(), x, y, 16, colors.LIGHTGRAY)
+    rl.DrawText(f"[C] - Toggle Checkpoints ({c_on})".encode(), x, y, 16, colors.RAYWHITE)
     y += 35
     rl.DrawText(
         "Left / Right Arrow - Prev/Next Track".encode(),
         x,
         y,
         16,
-        colors.LIGHTGRAY,
+        colors.RAYWHITE,
     )
     y += 35
     _draw_sidebar_separator(x, y, sep_w)
@@ -159,6 +159,29 @@ def _draw_ui_sidebar(
     y += 35
     y = _draw_fitness_gradient_block(x, y)
     rl.DrawFPS(x, SCREEN_HEIGHT - 30)
+
+
+def _draw_brain_cam_key() -> None:
+    """Bottom-right Brain Cam legend; matches left sidebar typography (header + body)."""
+    margin = 20
+    line_step = 32
+    entries: list[tuple[bytes, int, object]] = [
+        (b"Brain Cam Key", 18, colors.SKYBLUE),
+        (b"Yellow: Inputs (Sensors + Speed)", 16, colors.RAYWHITE),
+        (b"  L / DL / F / DR / R = Five Sensors", 16, colors.RAYWHITE),
+        (b"  SPD = Speed (Normalized)", 16, colors.RAYWHITE),
+        (f"Blue: Hidden Layer ({HIDDEN_DIM} Neurons)".encode(), 16, colors.RAYWHITE),
+        (b"Right: Outputs (A = Accel, B = Brake)", 16, colors.RAYWHITE),
+        (b"  L / S / R = Left / Straight / Right", 16, colors.RAYWHITE),
+        (b"Green Dot = Selected Action", 16, colors.RAYWHITE),
+    ]
+    total_h = line_step * len(entries)
+    y = SCREEN_HEIGHT - margin - total_h
+    for text, font, color in entries:
+        w = rl.MeasureText(text, font)
+        x = SCREEN_WIDTH - margin - w
+        rl.DrawText(text, x, y, font, color)
+        y += line_step
 
 
 def _process_checkpoint_crossing(
@@ -221,6 +244,93 @@ class Simulation:
         denom = max(car.base_max_speed, 1e-6)
         normalized_speed = car.velocity / denom
         return normalized_sensors + [normalized_speed]
+
+    def _draw_brain_cam(self, car: Car, brain, start_x: int, start_y: int) -> None:
+        """Mini network diagram: inputs, hidden layer, outputs for one car/brain pair."""
+
+        def _fade(c, alpha: float):
+            a = max(0.0, min(1.0, alpha))
+            if hasattr(rl, "Fade"):
+                return rl.Fade(c, float(a))
+            return rl.ColorAlpha(c, int(255 * a))
+
+        activations = [1.0 - (d / car.sensor_range) for d in car.last_sensor_distances]
+        activations.append(car.velocity / max(car.base_max_speed, 1e-6))
+
+        state = self._state_from_distances(car.last_sensor_distances, car)
+        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            logits = brain(state_tensor)
+        action = int(torch.argmax(logits, dim=-1).item())
+
+        layer_x = [start_x, start_x + 90, start_x + 180]
+        hidden_step = 250 // max(1, HIDDEN_DIM - 1)
+        edge_color = _fade(colors.WHITE, 0.28)
+
+        for i in range(6):
+            iy = start_y + i * 35
+            for h in range(HIDDEN_DIM):
+                hy = start_y - 45 + h * hidden_step
+                rl.DrawLine(
+                    int(layer_x[0]),
+                    int(iy),
+                    int(layer_x[1]),
+                    int(hy),
+                    edge_color,
+                )
+
+        for h in range(HIDDEN_DIM):
+            hy = start_y - 45 + h * hidden_step
+            for o in range(6):
+                oy = start_y + o * 35
+                rl.DrawLine(
+                    int(layer_x[1]),
+                    int(hy),
+                    int(layer_x[2]),
+                    int(oy),
+                    edge_color,
+                )
+
+        input_labels = [b"L", b"DL", b"F", b"DR", b"R", b"SPD"]
+        output_labels = [
+            b"A+L",
+            b"A+S",
+            b"A+R",
+            b"B+L",
+            b"B+S",
+            b"B+R",
+        ]
+
+        for i in range(6):
+            iy = start_y + i * 35
+            act = max(0.0, min(1.0, activations[i]))
+            color = _fade(colors.YELLOW, act) if act > 0.1 else colors.DARKGRAY
+            rl.DrawCircle(int(layer_x[0]), int(iy), 10, color)
+            rl.DrawCircleLines(int(layer_x[0]), int(iy), 10, colors.LIGHTGRAY)
+            rl.DrawText(input_labels[i], int(layer_x[0]) - 35, int(iy) - 5, 10, colors.LIGHTGRAY)
+
+        avg_act = sum(activations) / len(activations)
+        for h in range(HIDDEN_DIM):
+            hy = start_y - 45 + h * hidden_step
+            rl.DrawCircle(
+                int(layer_x[1]),
+                int(hy),
+                6,
+                _fade(colors.SKYBLUE, avg_act * 0.8 + 0.2),
+            )
+
+        for o in range(6):
+            oy = start_y + o * 35
+            color = colors.GREEN if o == action else colors.DARKGRAY
+            rl.DrawCircle(int(layer_x[2]), int(oy), 10, color)
+            rl.DrawCircleLines(int(layer_x[2]), int(oy), 10, colors.LIGHTGRAY)
+            rl.DrawText(
+                output_labels[o],
+                int(layer_x[2]) + 15,
+                int(oy) - 5,
+                10,
+                colors.LIGHTGRAY,
+            )
 
     def run(self) -> None:
         rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, b"NeuroDrift")
@@ -314,6 +424,15 @@ class Simulation:
             min_fitness = min(fit_vals) if fit_vals else 0.0
             max_fitness = max(fit_vals) if fit_vals else 0.0
 
+            best_car = None
+            best_brain = None
+            max_fit = -float("inf")
+            for i, car in enumerate(self.population.cars):
+                if car.is_alive and car.fitness > max_fit:
+                    max_fit = car.fitness
+                    best_car = car
+                    best_brain = self.population.brains[i]
+
             rl.BeginDrawing()
             rl.ClearBackground(colors.DARKGRAY)
             self.track.render()
@@ -321,7 +440,9 @@ class Simulation:
                 self.track.render_checkpoints()
             for idx, car in enumerate(self.population.cars):
                 if car.is_alive:
-                    if idx in self.population.elite_indices:
+                    if car is best_car:
+                        body = colors.MAGENTA
+                    elif idx in self.population.elite_indices:
                         body = _ELITE_COLOR
                     else:
                         body = get_fitness_color(
@@ -342,6 +463,20 @@ class Simulation:
                 show_sensors=self.show_sensors,
                 show_checkpoints=self.show_checkpoints,
             )
+
+            if best_car and best_brain:
+                right_panel_x = SCREEN_WIDTH - 350
+                brain_start_x = right_panel_x + 40
+                hidden_col_x = brain_start_x + 90
+                title_text = b"LIVE BRAIN CAM (LEADER)"
+                title_font = 24
+                title_w = rl.MeasureText(title_text, title_font)
+                title_x = int(hidden_col_x - title_w / 2)
+                rl.DrawText(title_text, title_x, 26, title_font, colors.SKYBLUE)
+                self._draw_brain_cam(best_car, best_brain, brain_start_x, 142)
+
+            _draw_brain_cam_key()
+
             rl.EndDrawing()
 
         rl.CloseWindow()
