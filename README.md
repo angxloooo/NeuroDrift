@@ -15,3 +15,14 @@ pip install -r requirements.txt
 ```bash
 python3 main.py
 ```
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| **S** | Toggle sensor rays |
+| **C** | Toggle checkpoint debug lines |
+| **← / →** | Previous / next track shape (manual) |
+| **Space** | Toggle camera follow (zoom on the current leader) |
+
+The left sidebar shows generation, population, track mode, fitness, and a **Brain Cam** (leader network) plus a short legend on the bottom right.

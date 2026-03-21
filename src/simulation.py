@@ -86,6 +86,7 @@ def _draw_ui_sidebar(
     max_steps: int,
     show_sensors: bool,
     show_checkpoints: bool,
+    camera_follow: bool,
 ) -> None:
     """Left column UI: title, stats, controls, color legend."""
     x = 30
@@ -149,6 +150,9 @@ def _draw_ui_sidebar(
         16,
         colors.RAYWHITE,
     )
+    y += 35
+    cf_on = "ON" if camera_follow else "OFF"
+    rl.DrawText(f"[Space] - Camera Follow ({cf_on})".encode(), x, y, 16, colors.RAYWHITE)
     y += 35
     _draw_sidebar_separator(x, y, sep_w)
     y += 35
@@ -236,6 +240,7 @@ class Simulation:
         self.last_gen_best_fitness = 0.0
         self.show_sensors = True
         self.generation_step = 0
+        self.camera_follow = False
 
     def _state_from_distances(
         self, sensor_distances: list[float], car: Car
@@ -343,6 +348,8 @@ class Simulation:
                 self.show_sensors = not self.show_sensors
             if rl.IsKeyPressed(rl.KEY_C):
                 self.show_checkpoints = not self.show_checkpoints
+            if rl.IsKeyPressed(rl.KEY_SPACE):
+                self.camera_follow = not self.camera_follow
 
             manual_shift = 0
             if rl.IsKeyPressed(rl.KEY_RIGHT):
@@ -433,8 +440,25 @@ class Simulation:
                     best_car = car
                     best_brain = self.population.brains[i]
 
+            camera = ffi.new("struct Camera2D *")
+            if self.camera_follow and best_car is not None:
+                camera.offset.x = SCREEN_WIDTH / 2.0
+                camera.offset.y = SCREEN_HEIGHT / 2.0
+                camera.target.x = float(best_car.position[0])
+                camera.target.y = float(best_car.position[1])
+                camera.rotation = 0.0
+                camera.zoom = 2.5
+            else:
+                camera.offset.x = 0.0
+                camera.offset.y = 0.0
+                camera.target.x = 0.0
+                camera.target.y = 0.0
+                camera.rotation = 0.0
+                camera.zoom = 1.0
+
             rl.BeginDrawing()
             rl.ClearBackground(colors.DARKGRAY)
+            rl.BeginMode2D(camera[0])
             self.track.render()
             if self.show_checkpoints:
                 self.track.render_checkpoints()
@@ -452,6 +476,7 @@ class Simulation:
                         body_color=body,
                         show_sensors=self.show_sensors,
                     )
+            rl.EndMode2D()
             steps_left = max(0, MAX_GENERATION_STEPS - self.generation_step)
             _draw_ui_sidebar(
                 generation=self.generation,
@@ -462,6 +487,7 @@ class Simulation:
                 max_steps=MAX_GENERATION_STEPS,
                 show_sensors=self.show_sensors,
                 show_checkpoints=self.show_checkpoints,
+                camera_follow=self.camera_follow,
             )
 
             if best_car and best_brain:
