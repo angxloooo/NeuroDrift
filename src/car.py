@@ -44,6 +44,7 @@ class Car:
         self._default_target_checkpoint = spawn_target_checkpoint
         self.target_checkpoint = spawn_target_checkpoint
         self.laps = 0
+        self.last_sensor_distances = [self.sensor_range] * 5
 
     def get_sensor_distances(self, track: Track) -> list[float]:
         """Cast 5 rays and return distance to nearest boundary for each."""
@@ -75,6 +76,7 @@ class Car:
 
             distances.append(min_dist)
 
+        self.last_sensor_distances = distances
         return distances
 
     def apply_action(self, action: int, dt: float = 1.0 / 60.0) -> None:
@@ -119,17 +121,16 @@ class Car:
         body_color=colors.RED,
         *,
         show_sensors: bool = True,
-        sensor_distances: list[float] | None = None,
     ) -> None:
-        """Draw the car and optional sensor rays to actual hit distances."""
+        """Draw the car and optional sensor rays using last raycast from get_sensor_distances."""
         if not self.is_alive:
             return
 
         cx, cy = self.position
 
-        if show_sensors and sensor_distances is not None:
+        if show_sensors:
             for i, deg in enumerate(SENSOR_ANGLES):
-                dist = sensor_distances[i]
+                dist = self.last_sensor_distances[i]
                 rad = math.radians(deg) + self.angle
                 ray_start_x = cx
                 ray_start_y = cy

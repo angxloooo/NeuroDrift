@@ -80,7 +80,6 @@ def _draw_fitness_gradient_block(x: int, y: int, bar_w: int = 280) -> int:
 def _draw_ui_sidebar(
     *,
     generation: int,
-    alive: int,
     population_size: int,
     best_fitness: float,
     steps_left: int,
@@ -101,7 +100,7 @@ def _draw_ui_sidebar(
     rl.DrawText(f"Generation: {generation}".encode(), x, y, 18, colors.RAYWHITE)
     y += 35
     rl.DrawText(
-        f"Alive: {alive}/{population_size}".encode(),
+        f"Population: {population_size}".encode(),
         x,
         y,
         18,
@@ -277,7 +276,6 @@ class Simulation:
                     f"Best fitness (prev): {self.last_gen_best_fitness:.1f}"
                 )
 
-            alive = sum(1 for c in self.population.cars if c.is_alive)
             fit_vals = [c.fitness for c in self.population.cars]
             min_fitness = min(fit_vals) if fit_vals else 0.0
             max_fitness = max(fit_vals) if fit_vals else 0.0
@@ -289,11 +287,6 @@ class Simulation:
                 self.track.render_checkpoints()
             for idx, car in enumerate(self.population.cars):
                 if car.is_alive:
-                    render_distances = (
-                        car.get_sensor_distances(self.track)
-                        if self.show_sensors
-                        else None
-                    )
                     if idx in self.population.elite_indices:
                         body = _ELITE_COLOR
                     else:
@@ -303,12 +296,10 @@ class Simulation:
                     car.render(
                         body_color=body,
                         show_sensors=self.show_sensors,
-                        sensor_distances=render_distances,
                     )
             steps_left = max(0, MAX_GENERATION_STEPS - self.generation_step)
             _draw_ui_sidebar(
                 generation=self.generation,
-                alive=alive,
                 population_size=len(self.population.cars),
                 best_fitness=self.last_gen_best_fitness,
                 steps_left=steps_left,

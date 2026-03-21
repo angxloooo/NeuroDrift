@@ -14,6 +14,20 @@ ACTION_DIM = 6
 HIDDEN_DIM = 16
 
 
+def crossover_state_dict(
+    state_dict_a: dict[str, torch.Tensor],
+    state_dict_b: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Uniform crossover: each parameter value is taken from parent A or B with 50% probability."""
+    out: dict[str, torch.Tensor] = {}
+    for key in state_dict_a:
+        a = state_dict_a[key]
+        b = state_dict_b[key]
+        mask = torch.rand_like(a) < 0.5
+        out[key] = torch.where(mask, a, b).clone()
+    return out
+
+
 def mutate_state_dict(
     state_dict: dict[str, torch.Tensor],
     mutation_rate: float = 0.15,
@@ -89,7 +103,7 @@ class PopulationManager:
             self.brains.append(Brain())
 
     def evolve_and_reset(self) -> float:
-        """Sort by fitness, elitism + mutation for the rest, reset all cars. Returns best fitness."""
+        """Sort by fitness; elites unchanged; others from two-parent crossover + mutation."""
         indexed = [(i, self.cars[i].fitness) for i in range(self.population_size)]
         indexed.sort(key=lambda t: (-t[1], t[0]))
         ranked_indices = [i for i, _ in indexed]
@@ -103,10 +117,13 @@ class PopulationManager:
         for i in range(self.population_size):
             if i in self.elite_indices:
                 continue
-            parent_idx = random.choice(elite)
-            parent_sd = elite_brains[parent_idx].state_dict()
+            pa = random.choice(elite)
+            pb = random.choice(elite)
+            sd_a = elite_brains[pa].state_dict()
+            sd_b = elite_brains[pb].state_dict()
+            child_sd = crossover_state_dict(sd_a, sd_b)
             mutated = mutate_state_dict(
-                parent_sd,
+                child_sd,
                 mutation_rate=self.mutation_rate,
                 noise_scale=self.noise_scale,
             )
