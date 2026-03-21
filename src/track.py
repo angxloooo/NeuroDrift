@@ -42,6 +42,11 @@ class Track:
         self._boundary_segments = self._build_boundary_segments()
         self.checkpoints = self._build_checkpoints()
 
+    def set_shape(self, shape_index: int) -> None:
+        self.current_shape = shape_index % 3
+        self._boundary_segments = self._build_boundary_segments()
+        self.checkpoints = self._build_checkpoints()
+
     def get_spawn_info(
         self, checkpoint_idx: int
     ) -> tuple[tuple[float, float], float]:

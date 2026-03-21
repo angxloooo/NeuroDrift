@@ -142,6 +142,14 @@ def _draw_ui_sidebar(
     c_on = "ON" if show_checkpoints else "OFF"
     rl.DrawText(f"[C] - Toggle Checkpoints ({c_on})".encode(), x, y, 16, colors.LIGHTGRAY)
     y += 35
+    rl.DrawText(
+        "Left / Right Arrow - Prev/Next Track".encode(),
+        x,
+        y,
+        16,
+        colors.LIGHTGRAY,
+    )
+    y += 35
     _draw_sidebar_separator(x, y, sep_w)
     y += 35
 
@@ -225,6 +233,21 @@ class Simulation:
                 self.show_sensors = not self.show_sensors
             if rl.IsKeyPressed(rl.KEY_C):
                 self.show_checkpoints = not self.show_checkpoints
+
+            manual_shift = 0
+            if rl.IsKeyPressed(rl.KEY_RIGHT):
+                manual_shift = 1
+            elif rl.IsKeyPressed(rl.KEY_LEFT):
+                manual_shift = -1
+
+            if manual_shift != 0:
+                self.track.set_shape(self.track.current_shape + manual_shift)
+                spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
+                self.last_gen_best_fitness = self.population.evolve_and_reset(
+                    spawn_pos, spawn_angle
+                )
+                self.generation += 1
+                self.generation_step = 0
 
             collision_pt = ffi.new("struct Vector2 *")
             all_dead = True

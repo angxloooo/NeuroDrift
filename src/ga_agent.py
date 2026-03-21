@@ -14,20 +14,6 @@ ACTION_DIM = 6
 HIDDEN_DIM = 16
 
 
-def crossover_state_dict(
-    state_dict_a: dict[str, torch.Tensor],
-    state_dict_b: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
-    """Uniform crossover: each parameter value is taken from parent A or B with 50% probability."""
-    out: dict[str, torch.Tensor] = {}
-    for key in state_dict_a:
-        a = state_dict_a[key]
-        b = state_dict_b[key]
-        mask = torch.rand_like(a) < 0.5
-        out[key] = torch.where(mask, a, b).clone()
-    return out
-
-
 def mutate_state_dict(
     state_dict: dict[str, torch.Tensor],
     mutation_rate: float = 0.15,
@@ -107,7 +93,7 @@ class PopulationManager:
         spawn_position: tuple[float, float] | None = None,
         spawn_angle: float | None = None,
     ) -> float:
-        """Sort by fitness; elites unchanged; others from two-parent crossover + mutation."""
+        """Sort by fitness; elites unchanged; children from elite parent + wildcard or optimizer mutation."""
         if spawn_position is not None:
             self.spawn_position = spawn_position
         if spawn_angle is not None:
@@ -117,25 +103,24 @@ class PopulationManager:
         ranked_indices = [i for i, _ in indexed]
         best_fitness = indexed[0][1]
 
-        elite = ranked_indices[: self.elite_count]
-        self.elite_indices = set(elite)
-
-        elite_brains = {i: self.brains[i] for i in elite}
+        elite_list = ranked_indices[: self.elite_count]
+        self.elite_indices = set(elite_list)
 
         for i in range(self.population_size):
             if i in self.elite_indices:
                 continue
-            pa = random.choice(elite)
-            pb = random.choice(elite)
-            sd_a = elite_brains[pa].state_dict()
-            sd_b = elite_brains[pb].state_dict()
-            child_sd = crossover_state_dict(sd_a, sd_b)
-            mutated = mutate_state_dict(
-                child_sd,
-                mutation_rate=self.mutation_rate,
-                noise_scale=self.noise_scale,
-            )
-            self.brains[i].load_state_dict(mutated)
+            is_wildcard = random.random() < 0.20
+            parent_idx = random.choice(elite_list)
+            parent_state = self.brains[parent_idx].state_dict()
+            if is_wildcard:
+                child_weights = mutate_state_dict(
+                    parent_state, mutation_rate=0.30, noise_scale=0.5
+                )
+            else:
+                child_weights = mutate_state_dict(
+                    parent_state, mutation_rate=0.05, noise_scale=0.1
+                )
+            self.brains[i].load_state_dict(child_weights)
 
         for i in range(self.population_size):
             if i in self.elite_indices:
