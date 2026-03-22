@@ -1,6 +1,7 @@
 """Simulation module - main game loop and neuroevolution environment glue."""
 
 import colorsys
+import math
 
 import torch
 from raylib import ffi, rl, colors
@@ -19,18 +20,62 @@ MAX_SPEED = 250.0
 MAX_GENERATION_STEPS = 2500
 POPULATION_SIZE = 100
 
+# --- Strict fitness economy (only checkpoint/lap gains; heavy drains elsewhere) ---
+FITNESS_CHECKPOINT_REWARD = 130.0
+FITNESS_LAP_REWARD = 380.0
+# Small tax every frame so “existing” in the sim is never free.
+FITNESS_BASE_COST_PER_FRAME = 1.25
+# No checkpoint for this long → extra drain per frame (on top of base cost).
+STARVATION_GRACE_FRAMES = 30
+STARVATION_DRAIN_TIER1 = 38.0  # frames in (grace, grace + 60]
+STARVATION_DRAIN_TIER2 = 115.0  # frames after tier1 band
+STARVATION_TIER1_WIDTH = 60
+FITNESS_WALL_DRAIN_PER_FRAME = 125.0
+
+# Checkpoint gates: require motion aligned with CCW track direction; cap multi-hits / frame.
+CHECKPOINT_MIN_FORWARD_FRAC = 0.28  # dot(move, tangent) >= frac * |move|
+CHECKPOINT_MAX_AWARDS_PER_FRAME = 2
+# Fitness only every N sequential gate crossings (still advance target every crossing).
+CHECKPOINT_FITNESS_INTERVAL = 20
+
+# Body color: gates dominate ordering; path length updates every frame for smooth hue changes.
+COLOR_PROGRESS_GATE_WEIGHT = 10000.0
+
 _ELITE_COLOR = getattr(colors, "WHITE", (255, 255, 255, 255))
 FITNESS_HUE_MAX = 0.65
 
 
+def _starvation_extra_per_frame(frames_since_checkpoint: int) -> float:
+    """Escalating penalty for not hitting the next checkpoint; 0 during grace."""
+    fs = frames_since_checkpoint
+    if fs <= STARVATION_GRACE_FRAMES:
+        return 0.0
+    end_tier1 = STARVATION_GRACE_FRAMES + STARVATION_TIER1_WIDTH
+    if fs <= end_tier1:
+        return STARVATION_DRAIN_TIER1
+    return STARVATION_DRAIN_TIER2
+
+
+def _car_color_progress_score(car: Car) -> float:
+    """Monotonic race-ish signal: discrete gates + continuous odometer (updates each frame)."""
+    return float(car.total_gates_crossed) * COLOR_PROGRESS_GATE_WEIGHT + car.total_distance_traveled
+
+
+def _apply_strict_fitness_penalties(car: Car, *, touching_wall: bool) -> None:
+    car.fitness -= FITNESS_BASE_COST_PER_FRAME
+    car.fitness -= _starvation_extra_per_frame(car.frames_since_checkpoint)
+    if touching_wall:
+        car.fitness -= FITNESS_WALL_DRAIN_PER_FRAME
+
+
 def get_fitness_color(
-    fitness: float, min_fitness: float, max_fitness: float
+    value: float, min_value: float, max_value: float
 ) -> tuple[int, int, int, int]:
-    """Map fitness to a smooth HSV spectrum (red hue 0 -> blue ~0.65) for raylib."""
-    if max_fitness == min_fitness:
+    """Map a scalar (e.g. fitness or track progress) to HSV red (low) -> blue ~0.65."""
+    if max_value == min_value:
         t = 0.0
     else:
-        t = (fitness - min_fitness) / (max_fitness - min_fitness)
+        t = (value - min_value) / (max_value - min_value)
     t = max(0.0, min(1.0, t))
 
     hue = t * FITNESS_HUE_MAX
@@ -47,9 +92,9 @@ def _draw_sidebar_separator(x: int, y: int, width: int) -> None:
 
 
 def _draw_fitness_gradient_block(x: int, y: int, bar_w: int = 280) -> int:
-    """Draw HSV fitness gradient + labels; returns y after block."""
+    """Draw HSV gradient legend for car body colors (track progress, not net fitness)."""
     rl.DrawText(
-        b"HSV gradient: red (low) -> blue (high) vs gen min/max",
+        b"Car colors: behind->ahead (gates + path length; updates every frame)",
         x,
         y,
         12,
@@ -65,10 +110,10 @@ def _draw_fitness_gradient_block(x: int, y: int, bar_w: int = 280) -> int:
         rl.DrawRectangle(x + i, bar_y, 1, bar_h, seg)
     rl.DrawRectangleLines(x, bar_y, bar_w, bar_h, colors.RAYWHITE)
     sub_y = bar_y + bar_h + 6
-    rl.DrawText(b"Worse (low fitness)", x, sub_y, 11, colors.WHITE)
+    rl.DrawText(b"Fewer gates", x, sub_y, 11, colors.WHITE)
     rl.DrawText(
-        b"Better (high fitness)",
-        x + bar_w - 130,
+        b"More gates",
+        x + bar_w - 65,
         sub_y,
         11,
         colors.WHITE,
@@ -188,6 +233,20 @@ def _draw_brain_cam_key() -> None:
         y += line_step
 
 
+def _checkpoint_ccw_tangent(track: Track, k: int) -> tuple[float, float]:
+    """Unit vector along CCW race direction at checkpoint k (perpendicular to gate radius)."""
+    cx, cy = track.center
+    (i1, i2) = track.checkpoints[k]
+    mx = (float(i1[0]) + float(i2[0])) * 0.5
+    my = (float(i1[1]) + float(i2[1])) * 0.5
+    rx, ry = mx - cx, my - cy
+    tx, ty = -ry, rx
+    n = math.hypot(tx, ty)
+    if n < 1e-9:
+        return (1.0, 0.0)
+    return (tx / n, ty / n)
+
+
 def _process_checkpoint_crossing(
     car: Car,
     track: Track,
@@ -195,13 +254,22 @@ def _process_checkpoint_crossing(
     old_y: float,
     collision_point,
 ) -> None:
-    """Award fitness when movement segment crosses the car's next checkpoint (sequential)."""
+    """Award when movement crosses the next gate in CCW order (not grazing / wrong-way / hub chaining)."""
     n_ck = len(track.checkpoints)
     if n_ck == 0 or not car.is_alive:
         return
+    dx = float(car.position[0]) - old_x
+    dy = float(car.position[1]) - old_y
+    move_len_sq = dx * dx + dy * dy
+    if move_len_sq < 1e-12:
+        return
+    move_len = math.sqrt(move_len_sq)
+    min_forward = CHECKPOINT_MIN_FORWARD_FRAC * move_len
+
     move_start = [old_x, old_y]
     move_end = [float(car.position[0]), float(car.position[1])]
-    while True:
+    awards = 0
+    while awards < CHECKPOINT_MAX_AWARDS_PER_FRAME:
         p1, p2 = track.checkpoints[car.target_checkpoint]
         seg_start = [float(p1[0]), float(p1[1])]
         seg_end = [float(p2[0]), float(p2[1])]
@@ -209,12 +277,21 @@ def _process_checkpoint_crossing(
             move_start, move_end, seg_start, seg_end, collision_point
         ):
             break
-        car.fitness += 1000.0
+        tx, ty = _checkpoint_ccw_tangent(track, car.target_checkpoint)
+        if (dx * tx + dy * ty) < min_forward:
+            break
+        car.frames_since_checkpoint = 0
         car.target_checkpoint += 1
+        awards += 1
+        car.checkpoints_since_fitness_reward += 1
+        car.total_gates_crossed += 1
+        if car.checkpoints_since_fitness_reward >= CHECKPOINT_FITNESS_INTERVAL:
+            car.fitness += FITNESS_CHECKPOINT_REWARD * CHECKPOINT_FITNESS_INTERVAL
+            car.checkpoints_since_fitness_reward = 0
         if car.target_checkpoint >= n_ck:
             car.target_checkpoint = 0
             car.laps += 1
-            car.fitness += 5000.0
+            car.fitness += FITNESS_LAP_REWARD
 
 
 class Simulation:
@@ -381,30 +458,31 @@ class Simulation:
                     logits = brain(state_tensor)
                     action = int(logits.argmax(dim=-1).item())
 
-                safe_position = list(car.position)
                 old_x = float(car.position[0])
                 old_y = float(car.position[1])
+                safe_pos = list(car.position)
                 car.apply_action(action, dt=DT)
-                car.fitness += (car.velocity * DT) * 0.5
 
                 _process_checkpoint_crossing(
                     car, self.track, old_x, old_y, collision_pt
                 )
 
+                car.frames_since_checkpoint += 1
+
                 hit = self.track.check_car_collision(car)
                 if hit:
-                    car.position = list(safe_position)
+                    car.position = safe_pos
                     car.velocity *= 0.5
                     car.is_touching_wall = True
-                    car.active_max_speed = car.base_max_speed * 0.5
-                    car.active_acceleration = car.base_acceleration * 0.5
-                    if car.velocity > car.active_max_speed:
-                        car.velocity = car.active_max_speed
-                    car.fitness -= 2.0
                 else:
                     car.is_touching_wall = False
-                    car.active_max_speed = car.base_max_speed
-                    car.active_acceleration = car.base_acceleration
+
+                _apply_strict_fitness_penalties(car, touching_wall=hit)
+
+                car.total_distance_traveled += math.hypot(
+                    float(car.position[0]) - old_x,
+                    float(car.position[1]) - old_y,
+                )
 
             self.generation_step += 1
             if self.generation_step >= MAX_GENERATION_STEPS:
@@ -414,8 +492,6 @@ class Simulation:
                 all_dead = True
 
             if all_dead:
-                if self.generation % 10 == 0:
-                    self.track.cycle_shape()
                 spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
                 self.last_gen_best_fitness = self.population.evolve_and_reset(
                     spawn_pos, spawn_angle
@@ -427,9 +503,10 @@ class Simulation:
                     f"Best fitness (prev): {self.last_gen_best_fitness:.1f}"
                 )
 
-            fit_vals = [c.fitness for c in self.population.cars]
-            min_fitness = min(fit_vals) if fit_vals else 0.0
-            max_fitness = max(fit_vals) if fit_vals else 0.0
+            alive = [c for c in self.population.cars if c.is_alive]
+            prog_vals = [_car_color_progress_score(c) for c in alive]
+            min_prog = min(prog_vals) if prog_vals else 0.0
+            max_prog = max(prog_vals) if prog_vals else 0.0
 
             best_car = None
             best_brain = None
@@ -470,7 +547,7 @@ class Simulation:
                         body = _ELITE_COLOR
                     else:
                         body = get_fitness_color(
-                            car.fitness, min_fitness, max_fitness
+                            _car_color_progress_score(car), min_prog, max_prog
                         )
                     car.render(
                         body_color=body,

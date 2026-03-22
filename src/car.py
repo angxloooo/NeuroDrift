@@ -9,6 +9,10 @@ from .track import Track
 # Sensor angles in degrees relative to car heading: left, diag-left, forward, diag-right, right
 SENSOR_ANGLES = [-90, -45, 0, 45, 90]
 
+# Steering only when moving forward; scales from 0 at ~MIN to full at ~FULL (sim units ≈ px/s).
+MIN_FORWARD_FOR_STEER = 10.0
+STEER_FULL_AT_SPEED = 72.0
+
 
 class Car:
     """A top-down car with 5 raycast sensors and simple physics."""
@@ -44,6 +48,10 @@ class Car:
         self._default_target_checkpoint = spawn_target_checkpoint
         self.target_checkpoint = spawn_target_checkpoint
         self.laps = 0
+        self.frames_since_checkpoint = 0
+        self.checkpoints_since_fitness_reward = 0
+        self.total_gates_crossed = 0
+        self.total_distance_traveled = 0.0
         self.last_sensor_distances = [self.sensor_range] * 5
 
     def get_sensor_distances(self, track: Track) -> list[float]:
@@ -84,21 +92,29 @@ class Car:
         if not self.is_alive:
             return
 
-        if action in (0, 3):
-            self.angle -= self.turn_rate * dt
-        elif action in (2, 5):
-            self.angle += self.turn_rate * dt
-
         if action <= 2:
+            turn_mult = 0.8 if action in (0, 2) else 1.0
+            step_accel = self.active_acceleration * turn_mult
+            step_max = self.active_max_speed * turn_mult
             self.velocity = min(
-                self.velocity + self.active_acceleration * dt,
-                self.active_max_speed,
+                self.velocity + step_accel * dt,
+                step_max,
             )
         else:
             self.velocity = max(
                 self.velocity - self.brake_deceleration * dt,
                 0.0,
             )
+
+        span = max(1e-6, STEER_FULL_AT_SPEED - MIN_FORWARD_FOR_STEER)
+        steer_scale = min(
+            1.0,
+            max(0.0, self.velocity - MIN_FORWARD_FOR_STEER) / span,
+        )
+        if action in (0, 3):
+            self.angle -= self.turn_rate * dt * steer_scale
+        elif action in (2, 5):
+            self.angle += self.turn_rate * dt * steer_scale
 
         self.position[0] += self.velocity * math.cos(self.angle) * dt
         self.position[1] += self.velocity * math.sin(self.angle) * dt
@@ -115,6 +131,10 @@ class Car:
         self.active_acceleration = self.base_acceleration
         self.target_checkpoint = self._default_target_checkpoint
         self.laps = 0
+        self.frames_since_checkpoint = 0
+        self.checkpoints_since_fitness_reward = 0
+        self.total_gates_crossed = 0
+        self.total_distance_traveled = 0.0
 
     def render(
         self,
