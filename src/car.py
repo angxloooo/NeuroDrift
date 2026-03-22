@@ -44,7 +44,6 @@ class Car:
         self.radius = radius
         self.length = length
         self.fitness = 0.0
-        self.is_alive = True
         self._default_target_checkpoint = spawn_target_checkpoint
         self.target_checkpoint = spawn_target_checkpoint
         self.frames_since_checkpoint = 0
@@ -88,9 +87,6 @@ class Car:
 
     def apply_action(self, action: int, dt: float = 1.0 / 60.0) -> None:
         """Apply discrete action: accel/brake combined with left, straight, or right."""
-        if not self.is_alive:
-            return
-
         if action <= 2:
             turn_mult = 0.8 if action in (0, 2) else 1.0
             step_accel = self.active_acceleration * turn_mult
@@ -124,7 +120,6 @@ class Car:
         self.angle = angle
         self.velocity = 0.0
         self.fitness = 0.0
-        self.is_alive = True
         self.is_touching_wall = False
         self.active_max_speed = self.base_max_speed
         self.active_acceleration = self.base_acceleration
@@ -141,9 +136,6 @@ class Car:
         show_sensors: bool = True,
     ) -> None:
         """Draw the car and optional sensor rays using last raycast from get_sensor_distances."""
-        if not self.is_alive:
-            return
-
         cx, cy = self.position
 
         if show_sensors:

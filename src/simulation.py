@@ -14,7 +14,9 @@ from .track import Track
 SCREEN_WIDTH = 1450
 SCREEN_HEIGHT = 800
 FPS = 60
-DT = 1.0 / FPS
+# Car physics always integrates with this fixed step (never frame delta) so trajectories
+# match a fixed number of simulation ticks—same weights → same path across runs.
+FIXED_PHYSICS_DT = 1.0 / 60.0
 SENSOR_RANGE = 200.0
 MAX_SPEED = 250.0
 MAX_GENERATION_STEPS = 2500
@@ -256,7 +258,7 @@ def _process_checkpoint_crossing(
 ) -> None:
     """Award when movement crosses the next gate in CCW order (not grazing / wrong-way / hub chaining)."""
     n_ck = len(track.checkpoints)
-    if n_ck == 0 or not car.is_alive:
+    if n_ck == 0:
         return
     dx = float(car.position[0]) - old_x
     dy = float(car.position[1]) - old_y
@@ -415,7 +417,7 @@ class Simulation:
 
     def run(self) -> None:
         rl.InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, b"NeuroDrift")
-        rl.SetTargetFPS(60)
+        rl.SetTargetFPS(FPS)
 
         self.show_checkpoints = False
 
@@ -443,12 +445,7 @@ class Simulation:
                 self.generation_step = 0
 
             collision_pt = ffi.new("struct Vector2 *")
-            all_dead = True
             for idx, car in enumerate(self.population.cars):
-                if not car.is_alive:
-                    continue
-                all_dead = False
-
                 sensor_distances = car.get_sensor_distances(self.track)
                 state = self._state_from_distances(sensor_distances, car)
                 state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
@@ -460,7 +457,7 @@ class Simulation:
                 old_x = float(car.position[0])
                 old_y = float(car.position[1])
                 safe_pos = list(car.position)
-                car.apply_action(action, dt=DT)
+                car.apply_action(action, dt=FIXED_PHYSICS_DT)
 
                 _process_checkpoint_crossing(
                     car, self.track, old_x, old_y, collision_pt
@@ -485,12 +482,6 @@ class Simulation:
 
             self.generation_step += 1
             if self.generation_step >= MAX_GENERATION_STEPS:
-                for c in self.population.cars:
-                    if c.is_alive:
-                        c.is_alive = False
-                all_dead = True
-
-            if all_dead:
                 spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
                 self.last_gen_best_fitness = self.population.evolve_and_reset(
                     spawn_pos, spawn_angle
@@ -502,8 +493,8 @@ class Simulation:
                     f"Best fitness (prev): {self.last_gen_best_fitness:.1f}"
                 )
 
-            alive = [c for c in self.population.cars if c.is_alive]
-            prog_vals = [_car_color_progress_score(c) for c in alive]
+            cars = self.population.cars
+            prog_vals = [_car_color_progress_score(c) for c in cars]
             min_prog = min(prog_vals) if prog_vals else 0.0
             max_prog = max(prog_vals) if prog_vals else 0.0
 
@@ -511,7 +502,7 @@ class Simulation:
             best_brain = None
             max_fit = -float("inf")
             for i, car in enumerate(self.population.cars):
-                if car.is_alive and car.fitness > max_fit:
+                if car.fitness > max_fit:
                     max_fit = car.fitness
                     best_car = car
                     best_brain = self.population.brains[i]
@@ -539,19 +530,18 @@ class Simulation:
             if self.show_checkpoints:
                 self.track.render_checkpoints()
             for idx, car in enumerate(self.population.cars):
-                if car.is_alive:
-                    if car is best_car:
-                        body = colors.MAGENTA
-                    elif idx in self.population.elite_indices:
-                        body = _ELITE_COLOR
-                    else:
-                        body = get_fitness_color(
-                            _car_color_progress_score(car), min_prog, max_prog
-                        )
-                    car.render(
-                        body_color=body,
-                        show_sensors=self.show_sensors,
+                if car is best_car:
+                    body = colors.MAGENTA
+                elif idx in self.population.elite_indices:
+                    body = _ELITE_COLOR
+                else:
+                    body = get_fitness_color(
+                        _car_color_progress_score(car), min_prog, max_prog
                     )
+                car.render(
+                    body_color=body,
+                    show_sensors=self.show_sensors,
+                )
             rl.EndMode2D()
             steps_left = max(0, MAX_GENERATION_STEPS - self.generation_step)
             _draw_ui_sidebar(
