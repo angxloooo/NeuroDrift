@@ -138,7 +138,7 @@ def _draw_ui_sidebar(
     sep_w = 320
     y = 40
 
-    rl.DrawText(b"NEURODRIFT AI", x, y, 30, colors.ORANGE)
+    rl.DrawText(b"NEURODRIFT AI", x, y, 30, colors.SKYBLUE)
     y += 45
     _draw_sidebar_separator(x, y, sep_w)
     y += 35
@@ -290,7 +290,6 @@ def _process_checkpoint_crossing(
             car.checkpoints_since_fitness_reward = 0
         if car.target_checkpoint >= n_ck:
             car.target_checkpoint = 0
-            car.laps += 1
             car.fitness += FITNESS_LAP_REWARD
 
 

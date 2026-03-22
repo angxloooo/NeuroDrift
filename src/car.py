@@ -47,7 +47,6 @@ class Car:
         self.is_alive = True
         self._default_target_checkpoint = spawn_target_checkpoint
         self.target_checkpoint = spawn_target_checkpoint
-        self.laps = 0
         self.frames_since_checkpoint = 0
         self.checkpoints_since_fitness_reward = 0
         self.total_gates_crossed = 0
@@ -130,7 +129,6 @@ class Car:
         self.active_max_speed = self.base_max_speed
         self.active_acceleration = self.base_acceleration
         self.target_checkpoint = self._default_target_checkpoint
-        self.laps = 0
         self.frames_since_checkpoint = 0
         self.checkpoints_since_fitness_reward = 0
         self.total_gates_crossed = 0
