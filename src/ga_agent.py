@@ -6,11 +6,15 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from .car import Car
+from .car import CONTROL_LABELS, SENSOR_ANGLES, Car
 
 
-STATE_DIM = 6
-ACTION_DIM = 6
+# One input per sensor ray plus normalized speed.
+STATE_DIM = len(SENSOR_ANGLES) + 1
+# Analog outputs (tanh) for steer and pedal. With argmax over discrete actions a small mutation
+# almost never changed which pedal won, so populations never discovered braking and took every
+# corner flat out; analog outputs let mutations ease off the throttle a little at a time.
+ACTION_DIM = len(CONTROL_LABELS)
 HIDDEN_DIM = 16
 
 
@@ -30,8 +34,23 @@ def mutate_state_dict(
     return out
 
 
+def crossover_state_dict(
+    a: dict[str, torch.Tensor], b: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Child takes each neuron (a weight row and its bias) whole from one parent or the other."""
+    out: dict[str, torch.Tensor] = {}
+    rows: dict[str, torch.Tensor] = {}
+    for key, ta in a.items():
+        layer = key.rsplit(".", 1)[0]
+        if layer not in rows:
+            rows[layer] = torch.rand(ta.shape[0]) < 0.5
+        pick = rows[layer].view(-1, *([1] * (ta.dim() - 1)))
+        out[key] = torch.where(pick, ta, b[key]).clone()
+    return out
+
+
 class Brain(nn.Module):
-    """MLP policy: 6 inputs -> 16 -> 16 -> 6 logits."""
+    """MLP policy: STATE_DIM inputs -> 16 -> 16 -> ACTION_DIM controls in [-1, 1]."""
 
     def __init__(
         self,
@@ -46,6 +65,7 @@ class Brain(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, action_dim),
+            nn.Tanh(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -64,6 +84,7 @@ class PopulationManager:
         car_kwargs: dict[str, Any] | None = None,
         mutation_rate: float = 0.15,
         noise_scale: float = 0.2,
+        crossover_rate: float = 0.3,
     ):
         self.population_size = population_size
         self.elite_fraction = elite_fraction
@@ -72,6 +93,7 @@ class PopulationManager:
         self.car_kwargs = car_kwargs or {}
         self.mutation_rate = mutation_rate
         self.noise_scale = noise_scale
+        self.crossover_rate = crossover_rate
 
         self.elite_count = max(1, int(population_size * elite_fraction))
         self.elite_indices: set[int] = set()
@@ -93,7 +115,8 @@ class PopulationManager:
         spawn_position: tuple[float, float] | None = None,
         spawn_angle: float | None = None,
     ) -> float:
-        """Sort by fitness; elites unchanged; children from elite parent + wildcard or optimizer mutation."""
+        """Sort by fitness; elites unchanged; children from an elite parent (sometimes crossed with a
+        second elite) plus wildcard or fine mutation."""
         if spawn_position is not None:
             self.spawn_position = spawn_position
         if spawn_angle is not None:
@@ -112,6 +135,11 @@ class PopulationManager:
             is_wildcard = random.random() < 0.20
             parent_idx = random.choice(elite_list)
             parent_state = self.brains[parent_idx].state_dict()
+            if len(elite_list) > 1 and random.random() < self.crossover_rate:
+                other_idx = random.choice([e for e in elite_list if e != parent_idx])
+                parent_state = crossover_state_dict(
+                    parent_state, self.brains[other_idx].state_dict()
+                )
             if is_wildcard:
                 child_weights = mutate_state_dict(
                     parent_state, mutation_rate=0.30, noise_scale=0.5

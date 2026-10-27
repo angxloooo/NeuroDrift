@@ -3,19 +3,29 @@
 import math
 from raylib import rl, ffi, colors
 
-from .track import Track
+from .track import Track, segment_hit
 
 
-# Sensor angles in degrees relative to car heading: left, diag-left, forward, diag-right, right
-SENSOR_ANGLES = [-90, -45, 0, 45, 90]
+# Sensor angles in degrees relative to car heading, left (-90) to right (+90) every 22.5 degrees.
+# The in-between rays let the brain see a corner's shape (e.g. a chicane's second apex) early.
+SENSOR_ANGLES = [-90.0, -67.5, -45.0, -22.5, 0.0, 22.5, 45.0, 67.5, 90.0]
+SENSOR_LABELS = [b"L90", b"L68", b"L45", b"L23", b"F", b"R23", b"R45", b"R68", b"R90"]
 
 # Steering only when moving forward; scales from 0 at ~MIN to full at ~FULL (sim units ≈ px/s).
 MIN_FORWARD_FOR_STEER = 10.0
 STEER_FULL_AT_SPEED = 72.0
+# Off the throttle (and below the brake) the car always bleeds a little speed.
+COAST_DECELERATION = 30.0
+# Turning at full lock costs this fraction of acceleration and top speed.
+TURN_SPEED_PENALTY = 0.2
+
+# Analog controls from the brain, each in [-1, 1]: steer (left < 0 < right) and
+# pedal (brake < 0 < accelerate; 0 = coast).
+CONTROL_LABELS = [b"STEER", b"PEDAL"]
 
 
 class Car:
-    """A top-down car with 5 raycast sensors and simple physics."""
+    """A top-down car with raycast sensors (SENSOR_ANGLES) and simple physics."""
 
     def __init__(
         self,
@@ -39,6 +49,8 @@ class Car:
         self.active_max_speed = max_speed
         self.active_acceleration = acceleration
         self.is_touching_wall = False
+        # Set when the car crashes or stalls; it stops moving and scoring until reset.
+        self.retired = False
         self.turn_rate = turn_rate
         self.sensor_range = sensor_range
         self.radius = radius
@@ -50,10 +62,10 @@ class Car:
         self.checkpoints_since_fitness_reward = 0
         self.total_gates_crossed = 0
         self.total_distance_traveled = 0.0
-        self.last_sensor_distances = [self.sensor_range] * 5
+        self.last_sensor_distances = [self.sensor_range] * len(SENSOR_ANGLES)
 
     def get_sensor_distances(self, track: Track) -> list[float]:
-        """Cast 5 rays and return distance to nearest boundary for each."""
+        """Cast one ray per SENSOR_ANGLES entry; return distance to the nearest boundary for each."""
         cx, cy = self.position
         ray_start_x = cx
         ray_start_y = cy
@@ -65,52 +77,42 @@ class Car:
             ray_end_x = ray_start_x + math.cos(rad) * self.sensor_range
             ray_end_y = ray_start_y + math.sin(rad) * self.sensor_range
 
-            ray_start = [ray_start_x, ray_start_y]
-            ray_end = [ray_end_x, ray_end_y]
+            ray_start = (ray_start_x, ray_start_y)
+            ray_end = (ray_end_x, ray_end_y)
 
-            min_dist = self.sensor_range
-            collision_point = ffi.new("struct Vector2 *")
-
+            min_t = 1.0
             for (p1, p2) in nearby:
-                seg_p1 = [float(p1[0]), float(p1[1])]
-                seg_p2 = [float(p2[0]), float(p2[1])]
-                if rl.CheckCollisionLines(ray_start, ray_end, seg_p1, seg_p2, collision_point):
-                    dx = collision_point.x - ray_start_x
-                    dy = collision_point.y - ray_start_y
-                    dist = math.hypot(dx, dy)
-                    if dist < min_dist:
-                        min_dist = dist
+                t = segment_hit(ray_start, ray_end, p1, p2)
+                if 0.0 <= t < min_t:
+                    min_t = t
 
-            distances.append(min_dist)
+            distances.append(min_t * self.sensor_range)
 
         self.last_sensor_distances = distances
         return distances
 
-    def apply_action(self, action: int, dt: float = 1.0 / 60.0) -> None:
-        """Apply discrete action: accel/brake combined with left, straight, or right."""
-        if action <= 2:
-            turn_mult = 0.8 if action in (0, 2) else 1.0
-            step_accel = self.active_acceleration * turn_mult
-            step_max = self.active_max_speed * turn_mult
-            self.velocity = min(
-                self.velocity + step_accel * dt,
-                step_max,
-            )
+    def apply_action(self, steer: float, pedal: float, dt: float = 1.0 / 60.0) -> None:
+        """Apply analog controls: steer and pedal in [-1, 1] (see CONTROL_LABELS)."""
+        steer = max(-1.0, min(1.0, steer))
+        pedal = max(-1.0, min(1.0, pedal))
+        turn_mult = 1.0 - TURN_SPEED_PENALTY * abs(steer)
+        # Drag proportional to speed, sized so full throttle tops out at max speed: throttle then
+        # settles at a steady speed (~pedal * max), so "ease off for this corner" is a small change.
+        # Without it any positive throttle ran to top speed and populations never learned to slow.
+        drag = self.active_acceleration / max(1e-6, self.active_max_speed) * self.velocity
+        if pedal >= 0.0:
+            dv = self.active_acceleration * turn_mult * pedal - drag
         else:
-            self.velocity = max(
-                self.velocity - self.brake_deceleration * dt,
-                0.0,
-            )
+            dv = -(self.brake_deceleration * -pedal) - drag
+        dv -= COAST_DECELERATION
+        self.velocity = max(0.0, min(self.velocity + dv * dt, self.active_max_speed * turn_mult))
 
         span = max(1e-6, STEER_FULL_AT_SPEED - MIN_FORWARD_FOR_STEER)
         steer_scale = min(
             1.0,
             max(0.0, self.velocity - MIN_FORWARD_FOR_STEER) / span,
         )
-        if action in (0, 3):
-            self.angle -= self.turn_rate * dt * steer_scale
-        elif action in (2, 5):
-            self.angle += self.turn_rate * dt * steer_scale
+        self.angle += self.turn_rate * dt * steer_scale * steer
 
         self.position[0] += self.velocity * math.cos(self.angle) * dt
         self.position[1] += self.velocity * math.sin(self.angle) * dt
@@ -122,6 +124,7 @@ class Car:
         self.velocity = 0.0
         self.fitness = 0.0
         self.is_touching_wall = False
+        self.retired = False
         self.active_max_speed = self.base_max_speed
         self.active_acceleration = self.base_acceleration
         self.target_checkpoint = self.spawn_target_checkpoint

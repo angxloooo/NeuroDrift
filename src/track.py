@@ -1,46 +1,121 @@
-"""Track module - ring layouts and a Grand Prix circuit for the driving environment."""
+"""Track module - circuit layouts, walls, checkpoint gates and rendering."""
 
 import math
 from raylib import rl, ffi, colors
 
 
-SHAPE_NAMES = ["Oval", "Peanut", "Clover", "Grand Prix"]
-GRAND_PRIX_SHAPE = 3
-
-# Grand Prix circuit, clockwise on screen. Each entry is a polygon vertex rounded off with a
-# circular arc: (x, y, corner radius, track width at that corner). Radii are sized against car
-# handling (turn radius ~111 px flat out, ~40 px at crawl): R >= ~110 is flat, R ~45-75 needs a
-# braking zone. Width blends smoothly between corners; braking zones and the hairpin run wider
-# so there is room for more than one line.
-GP_CORNERS = [
-    (505, 715, 65, 110),  # T1: heavy braking 90 right at the end of the main straight
-    (505, 545, 140, 90),  # T2-T4: medium-speed esses
-    (600, 425, 120, 85),
-    (510, 295, 140, 85),
-    (525, 110, 70, 95),  # T5: onto the back straight
-    (975, 110, 65, 105),  # T6: hairpin (two 90s)
-    (975, 240, 65, 105),
-    (830, 240, 70, 95),  # T7-T8: infield lefts
-    (830, 420, 70, 95),
-    (1085, 420, 75, 90),  # T9: right onto the run to the chicane
-    (1085, 525, 50, 80),  # T10-T11: chicane
-    (975, 595, 50, 80),
-    (975, 715, 90, 95),  # T12: final corner onto the main straight
+# Circuits, clockwise on screen, easiest first. Each corner is a polygon vertex rounded off
+# with a circular arc: (x, y, corner radius, track width at that corner). Radii are sized
+# against car handling (turn radius ~111 px flat out, ~40 px at crawl): R >= ~110 is flat,
+# R ~45-75 needs a braking zone. Width blends smoothly between corners. The last corner leads
+# onto the main straight, where the start/finish line sits. Keep walls inside the play area
+# between the HUD columns: x 455-1125 (x <= 1095 above y 345, under the Brain Cam), y 55-770.
+LAYOUTS: list[tuple[str, list[tuple[float, float, float, float]]]] = [
+    (
+        "Speedway",  # Four flat-out bankings: learn to steer before learning to brake.
+        [
+            (530, 690, 150, 105),
+            (560, 140, 160, 105),
+            (1030, 160, 150, 105),
+            (1060, 700, 170, 105),
+        ],
+    ),
+    (
+        "Grand Prix",  # Every corner type: braking into T1, esses, hairpin, chicane.
+        [
+            (505, 715, 65, 110),  # T1: heavy braking 90 right at the end of the main straight
+            (505, 545, 140, 90),  # T2-T4: medium-speed esses
+            (600, 425, 120, 85),
+            (510, 295, 140, 85),
+            (525, 110, 70, 95),  # T5: onto the back straight
+            (975, 110, 65, 105),  # T6: hairpin (two 90s)
+            (975, 240, 65, 105),
+            (830, 240, 70, 95),  # T7-T8: infield lefts
+            (830, 420, 70, 95),
+            (1085, 420, 75, 90),  # T9: right onto the run to the chicane
+            (1085, 525, 50, 80),  # T10-T11: chicane
+            (975, 595, 50, 80),
+            (975, 715, 90, 95),  # T12: final corner onto the main straight
+        ],
+    ),
+    (
+        "High Speed",  # Long full-throttle runs broken by two chicanes; fast sweepers between.
+        [
+            (850, 110, 50, 90),  # T1-T2: first chicane at the end of the main straight
+            (900, 195, 50, 90),
+            (1040, 195, 100, 100),  # T3: fast right
+            (1040, 420, 50, 85),  # T4-T5: second chicane
+            (960, 480, 50, 85),
+            (960, 720, 100, 100),  # T6: onto the back straight
+            (520, 720, 160, 100),  # T7: long flat right
+            (520, 110, 120, 100),  # T8: final corner onto the main straight
+        ],
+    ),
+    (
+        "Technical",  # Esses, a double hairpin, then a long sweeping double-apex right.
+        [
+            (505, 715, 65, 105),  # T1
+            (505, 590, 110, 85),  # T2-T4: esses
+            (605, 470, 110, 85),
+            (505, 340, 110, 85),
+            (525, 110, 75, 95),  # T5
+            (745, 110, 55, 100),  # T6-T9: double hairpin
+            (745, 300, 55, 100),
+            (895, 300, 55, 100),
+            (895, 110, 55, 100),
+            (1025, 110, 60, 95),  # T10
+            (1045, 470, 180, 95),  # T11: double-apex sweeper
+            (990, 715, 100, 100),  # T12: final corner onto the main straight
+        ],
+    ),
+    (
+        "Street Circuit",  # Narrow, walled, almost every corner a slow 90.
+        [
+            (500, 720, 60, 85),
+            (500, 470, 50, 80),
+            (640, 470, 50, 80),
+            (640, 300, 50, 80),
+            (500, 300, 50, 80),
+            (500, 110, 60, 85),
+            (800, 110, 50, 80),
+            (800, 250, 50, 80),
+            (1000, 250, 50, 80),
+            (1000, 450, 50, 80),
+            (860, 450, 50, 80),
+            (860, 580, 50, 80),
+            (1060, 580, 60, 85),
+            (1060, 720, 60, 85),
+        ],
+    ),
 ]
-GP_SAMPLE_STEP = 4.0
-GP_GATE_SPACING = 45.0
-# Start/finish gate distance past the final corner exit.
-GP_START_LINE_OFFSET = 120.0
+SAMPLE_STEP = 4.0
+GATE_SPACING = 45.0
+# Start/finish gate distance past the final corner exit (capped at 40% of the main straight).
+START_LINE_OFFSET = 120.0
 # Max deviation (px) when reducing dense boundary samples to collision/raycast segments.
-GP_SIMPLIFY_TOLERANCE = 0.75
-GP_KERB_DEPTH = 7.0
-GP_KERB_BLOCK_SAMPLES = 2
+SIMPLIFY_TOLERANCE = 0.75
+KERB_DEPTH = 7.0
+KERB_BLOCK_SAMPLES = 2
 # Outside (exit) kerbs cover this many samples before each corner arc ends.
-GP_EXIT_KERB_SAMPLES = 12
+EXIT_KERB_SAMPLES = 12
 
 ASPHALT_COLOR = (44, 44, 48, 255)
 KERB_RED = (210, 40, 45, 255)
 KERB_WHITE = (235, 235, 235, 255)
+
+# Cars line up this far behind the start/finish gate so their first move crosses it cleanly
+# (spawning exactly on the gate left crossing it to float rounding on tilted gates).
+SPAWN_BEHIND_LINE = 15.0
+
+# Racing line: points every RACING_LINE_SPACING px along the centerline, kept this far off
+# each wall (car half-width 6.5 px plus slack), relaxed for RACING_LINE_SWEEPS sweeps.
+RACING_LINE_SPACING = 12.0
+RACING_LINE_MARGIN = 10.0
+RACING_LINE_SWEEPS = 1500
+RACING_LINE_RELAX = 1.5
+RACING_LINE_SLOW = (220, 50, 50, 255)
+RACING_LINE_MID = (240, 200, 40, 255)
+RACING_LINE_FAST = (60, 210, 90, 255)
 
 # Uniform grid over boundary segments so sensors/collision only test nearby walls.
 SEGMENT_GRID_CELL = 80.0
@@ -49,14 +124,34 @@ Point = tuple[float, float]
 Segment = tuple[Point, Point]
 
 
+def segment_hit(a: Point, b: Point, c: Point, d: Point) -> float:
+    """Fraction t along a->b where it crosses segment c-d, or -1.0 if they don't intersect.
+
+    Double precision on purpose: raylib's CheckCollisionLines (float32 + bounding-box tests)
+    misses crossings when one segment is nearly axis-aligned, e.g. a car driving straight
+    through a gate or a ray parallel to a wall.
+    """
+    rx, ry = b[0] - a[0], b[1] - a[1]
+    sx, sy = d[0] - c[0], d[1] - c[1]
+    denom = rx * sy - ry * sx
+    if abs(denom) < 1e-12:
+        return -1.0
+    qx, qy = c[0] - a[0], c[1] - a[1]
+    t = (qx * sy - qy * sx) / denom
+    u = (qx * ry - qy * rx) / denom
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return t
+    return -1.0
+
+
 def _fillet_centerline(
     corners: list[tuple[float, float, float, float]], step: float
-) -> tuple[list[Point], list[float], list[int], list[float], float]:
+) -> tuple[list[Point], list[float], list[int], list[float], float, float]:
     """Sample a closed polygon whose vertices are rounded with tangent circular arcs.
 
-    Returns (points, widths, turn_signs, corner_mid_s, main_straight_s): turn_signs is +1/-1
-    on corner arcs (right/left on screen) and 0 on straights; main_straight_s is the arc
-    length where the straight after the last corner begins.
+    Returns (points, widths, turn_signs, corner_mid_s, main_straight_s, main_straight_len):
+    turn_signs is +1/-1 on corner arcs (right/left on screen) and 0 on straights; the main
+    straight is the one after the last corner.
     """
     n = len(corners)
     arcs = []
@@ -89,7 +184,7 @@ def _fillet_centerline(
     points: list[Point] = []
     signs: list[int] = []
     corner_mid_s: list[float] = []
-    main_straight_s = 0.0
+    main_straight_s = main_straight_len = 0.0
     s = 0.0
     for i in range(n):
         ax, ay, bx, by, ccx, ccy, r, sweep, _ = arcs[i]
@@ -102,10 +197,10 @@ def _fillet_centerline(
         corner_mid_s.append(s + abs(sweep) * r * 0.5)
         s += abs(sweep) * r
 
-        if i == n - 1:
-            main_straight_s = s
         nx, ny = arcs[(i + 1) % n][0], arcs[(i + 1) % n][1]
         length = math.hypot(nx - bx, ny - by)
+        if i == n - 1:
+            main_straight_s, main_straight_len = s, length
         steps = math.ceil(length / step) if length > 1e-6 else 0
         for k in range(steps):
             points.append((bx + (nx - bx) * k / steps, by + (ny - by) * k / steps))
@@ -114,7 +209,7 @@ def _fillet_centerline(
 
     total = s
     widths = _blend_widths(points, corner_mid_s, [c[3] for c in corners], total)
-    return points, widths, signs, corner_mid_s, main_straight_s
+    return points, widths, signs, corner_mid_s, main_straight_s, main_straight_len
 
 
 def _cumulative_lengths(points: list[Point]) -> list[float]:
@@ -140,6 +235,63 @@ def _blend_widths(
         t = t * t * (3.0 - 2.0 * t)
         widths.append(w0 + (w1 - w0) * t)
     return widths
+
+
+def _circle_radius(p0: Point, p1: Point, p2: Point) -> float:
+    """Radius of the circle through three points (inf when collinear)."""
+    a, b, c = math.dist(p0, p1), math.dist(p1, p2), math.dist(p0, p2)
+    area2 = abs((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]))
+    return math.inf if area2 < 1e-9 else a * b * c / (2.0 * area2)
+
+
+def _min_curvature_line(
+    center: list[Point], normals: list[Point], limits: list[float]
+) -> list[Point]:
+    """Smoothest closed path with p_i = center_i + alpha_i * normal_i and |alpha_i| <= limit_i.
+
+    Minimizes the sum of squared second differences (discrete curvature) with projected
+    over-relaxed Gauss-Seidel on the biharmonic stencil.
+    """
+    m = len(center)
+    alpha = [0.0] * m
+
+    def pt(i: int) -> Point:
+        i %= m
+        return (center[i][0] + alpha[i] * normals[i][0], center[i][1] + alpha[i] * normals[i][1])
+
+    for _ in range(RACING_LINE_SWEEPS):
+        for i in range(m):
+            (x1, y1), (x2, y2) = pt(i - 1), pt(i + 1)
+            (x0, y0), (x3, y3) = pt(i - 2), pt(i + 2)
+            tx = (4.0 * (x1 + x2) - (x0 + x3)) / 6.0
+            ty = (4.0 * (y1 + y2) - (y0 + y3)) / 6.0
+            target = (tx - center[i][0]) * normals[i][0] + (ty - center[i][1]) * normals[i][1]
+            a = alpha[i] + RACING_LINE_RELAX * (target - alpha[i])
+            alpha[i] = max(-limits[i], min(limits[i], a))
+    return [pt(i) for i in range(m)]
+
+
+def _speed_profile(
+    line: list[Point], max_speed: float, turn_rate: float, accel: float, brake: float
+) -> list[float]:
+    """Fastest speed at each point: cornering limit v = turn_rate * R, then accel/brake passes."""
+    m = len(line)
+    v = [
+        min(max_speed, turn_rate * _circle_radius(line[i - 2], line[i], line[(i + 2) % m]))
+        for i in range(m)
+    ]
+    ds = [math.dist(line[i - 1], line[i]) for i in range(m)]
+    for _ in range(2):  # twice so the passes wrap around the lap
+        for i in range(m):
+            v[i] = min(v[i], math.sqrt(v[i - 1] ** 2 + 2.0 * accel * ds[i]))
+        for i in range(m - 1, -1, -1):
+            j = (i + 1) % m
+            v[i] = min(v[i], math.sqrt(v[j] ** 2 + 2.0 * brake * ds[j]))
+    return v
+
+
+def _lerp_color(a, b, t: float) -> tuple[int, int, int, int]:
+    return tuple(int(a[k] + (b[k] - a[k]) * t) for k in range(4))
 
 
 def _tangents(points: list[Point]) -> list[Point]:
@@ -200,141 +352,52 @@ def _strip(pairs: list[tuple[Point, Point]]):
 
 
 class Track:
-    """Closed driving course: boundary walls, ordered checkpoint gates, and rendering.
+    """Closed circuit from LAYOUTS: boundary walls, ordered checkpoint gates, and rendering."""
 
-    Shapes 0-2 are donut rings (outer and inner ovals approximated by line segments, with
-    radial gates); shape 3 is a Grand Prix circuit built from GP_CORNERS.
-    """
-
-    def __init__(
-        self,
-        center: tuple[float, float] = (750, 400),
-        outer_rx: float = 350.0,
-        outer_ry: float = 250.0,
-        inner_rx: float = 250.0,
-        inner_ry: float = 150.0,
-        num_segments: int = 36,
-        shape: int = GRAND_PRIX_SHAPE,
-    ):
-        self.center = center
-        self.outer_rx = outer_rx
-        self.outer_ry = outer_ry
-        self.inner_rx = inner_rx
-        self.inner_ry = inner_ry
-        self.num_segments = num_segments
+    def __init__(self, shape: int = 0):
         self.set_shape(shape)
 
     @property
     def shape_name(self) -> str:
-        return SHAPE_NAMES[self.current_shape]
-
-    def _distortion_at(self, a: float) -> float:
-        """Radial offset added to ellipse radii at parameter angle a (radians)."""
-        if self.current_shape == 0:
-            return 0.0
-        if self.current_shape == 1:
-            return 60.0 * math.sin(2.0 * a)
-        if self.current_shape == 2:
-            return 40.0 * math.sin(3.0 * a)
-        return 0.0
+        return LAYOUTS[self.current_shape][0]
 
     def cycle_shape(self) -> None:
-        """Advance layout (oval -> peanut -> clover -> grand prix -> ...) and rebuild geometry."""
+        """Advance to the next layout and rebuild geometry."""
         self.set_shape(self.current_shape + 1)
 
     def set_shape(self, shape_index: int) -> None:
-        self.current_shape = shape_index % len(SHAPE_NAMES)
-        self._asphalt = None
+        self.current_shape = shape_index % len(LAYOUTS)
         self._decor = []
-        if self.current_shape == GRAND_PRIX_SHAPE:
-            self._build_grand_prix()
-        else:
-            self._boundary_segments = self._build_boundary_segments()
-            self.checkpoints = self._build_checkpoints()
-            self.checkpoint_tangents = self._ring_checkpoint_tangents()
-            self.spawn_checkpoint = (3 * self.num_segments) // 4
+        self._build(LAYOUTS[self.current_shape][1])
         self._segment_grid = self._build_segment_grid()
+        self._racing_line = None
 
     def get_spawn_info(
         self, checkpoint_idx: int
     ) -> tuple[tuple[float, float], float]:
-        """Midpoint of a checkpoint gate and heading toward the next gate's midpoint."""
-        n = len(self.checkpoints)
-        if n == 0:
-            cx, cy = self.center
-            return ((float(cx), float(cy)), 0.0)
-        idx = checkpoint_idx % n
+        """Grid slot just behind a checkpoint gate's midpoint, facing the race direction."""
+        idx = checkpoint_idx % len(self.checkpoints)
         (i1, i2) = self.checkpoints[idx]
-        ix, iy = float(i1[0]), float(i1[1])
-        ox, oy = float(i2[0]), float(i2[1])
-        spawn_x = (ix + ox) * 0.5
-        spawn_y = (iy + oy) * 0.5
-        next_idx = (idx + 1) % n
-        (n1, n2) = self.checkpoints[next_idx]
-        nx = (float(n1[0]) + float(n2[0])) * 0.5
-        ny = (float(n1[1]) + float(n2[1])) * 0.5
-        spawn_angle = math.atan2(ny - spawn_y, nx - spawn_x)
-        return ((spawn_x, spawn_y), spawn_angle)
+        tx, ty = self.checkpoint_tangents[idx]
+        spawn_x = (i1[0] + i2[0]) * 0.5 - tx * SPAWN_BEHIND_LINE
+        spawn_y = (i1[1] + i2[1]) * 0.5 - ty * SPAWN_BEHIND_LINE
+        return ((spawn_x, spawn_y), math.atan2(ty, tx))
 
-    def _build_checkpoints(
-        self,
-    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-        """Radial segments from inner to outer ellipse at each angle step (race order)."""
-        cx, cy = self.center
-        n = self.num_segments
-        cks: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        for i in range(n):
-            a = 2.0 * math.pi * i / n
-            d = self._distortion_at(a)
-            ix = cx + (self.inner_rx + d) * math.cos(a)
-            iy = cy + (self.inner_ry + d) * math.sin(a)
-            ox = cx + (self.outer_rx + d) * math.cos(a)
-            oy = cy + (self.outer_ry + d) * math.sin(a)
-            cks.append(((ix, iy), (ox, oy)))
-        return cks
+    def gate_progress(self, position, target_checkpoint: int) -> float:
+        """Fraction (0-1) of the way from the previous gate to the target gate, along their midpoints."""
+        n = len(self.checkpoints)
+        (a1, a2), (b1, b2) = self.checkpoints[(target_checkpoint - 1) % n], self.checkpoints[target_checkpoint]
+        ax, ay = (a1[0] + a2[0]) * 0.5, (a1[1] + a2[1]) * 0.5
+        bx, by = (b1[0] + b2[0]) * 0.5, (b1[1] + b2[1]) * 0.5
+        dx, dy = bx - ax, by - ay
+        t = ((position[0] - ax) * dx + (position[1] - ay) * dy) / max(1e-9, dx * dx + dy * dy)
+        return max(0.0, min(1.0, t))
 
-    def _ring_checkpoint_tangents(self) -> list[Point]:
-        """Unit race direction at each radial gate (perpendicular to the gate radius)."""
-        cx, cy = self.center
-        out = []
-        for (i1, i2) in self.checkpoints:
-            rx = (i1[0] + i2[0]) * 0.5 - cx
-            ry = (i1[1] + i2[1]) * 0.5 - cy
-            n = math.hypot(rx, ry)
-            out.append((-ry / n, rx / n) if n > 1e-9 else (1.0, 0.0))
-        return out
-
-    def _ellipse_segments(
-        self,
-        cx: float,
-        cy: float,
-        rx: float,
-        ry: float,
-    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-        n = self.num_segments
-        segs: list[tuple[tuple[float, float], tuple[float, float]]] = []
-        for i in range(n):
-            a1 = 2.0 * math.pi * i / n
-            a2 = 2.0 * math.pi * (i + 1) / n
-            d1 = self._distortion_at(a1)
-            d2 = self._distortion_at(a2)
-            x1 = cx + (rx + d1) * math.cos(a1)
-            y1 = cy + (ry + d1) * math.sin(a1)
-            x2 = cx + (rx + d2) * math.cos(a2)
-            y2 = cy + (ry + d2) * math.sin(a2)
-            segs.append(((x1, y1), (x2, y2)))
-        return segs
-
-    def _build_boundary_segments(self) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-        cx, cy = self.center
-        outer = self._ellipse_segments(cx, cy, self.outer_rx, self.outer_ry)
-        inner = self._ellipse_segments(cx, cy, self.inner_rx, self.inner_ry)
-        return outer + inner
-
-    def _build_grand_prix(self) -> None:
+    def _build(self, corners: list[tuple[float, float, float, float]]) -> None:
         """Offset the filleted centerline into walls, gates, asphalt, kerbs and start line."""
-        center, widths, signs, _, main_s = _fillet_centerline(GP_CORNERS, GP_SAMPLE_STEP)
+        center, widths, signs, _, main_s, main_len = _fillet_centerline(corners, SAMPLE_STEP)
         tangents = _tangents(center)
+        self._centerline = (center, tangents, widths)
         n = len(center)
         side_a: list[Point] = []
         side_b: list[Point] = []
@@ -344,13 +407,13 @@ class Track:
             side_b.append((x + ty * h, y - tx * h))
 
         self._boundary_segments = _closed_loop_segments(
-            side_a, GP_SIMPLIFY_TOLERANCE
-        ) + _closed_loop_segments(side_b, GP_SIMPLIFY_TOLERANCE)
+            side_a, SIMPLIFY_TOLERANCE
+        ) + _closed_loop_segments(side_b, SIMPLIFY_TOLERANCE)
 
         s_along = _cumulative_lengths(center)
         total = s_along[-1] + math.dist(center[-1], center[0])
-        n_gates = max(1, round(total / GP_GATE_SPACING))
-        start_s = main_s + GP_START_LINE_OFFSET
+        n_gates = max(1, round(total / GATE_SPACING))
+        start_s = main_s + min(START_LINE_OFFSET, 0.4 * main_len)
         self.checkpoints = []
         self.checkpoint_tangents = []
         for g in range(n_gates):
@@ -368,9 +431,9 @@ class Track:
             sign = signs[i]
             if sign == 0 or signs[(i + 1) % n] != sign:
                 continue
-            near_exit = signs[(i + GP_EXIT_KERB_SAMPLES) % n] != sign
+            near_exit = signs[(i + EXIT_KERB_SAMPLES) % n] != sign
             tx, ty = tangents[i]
-            d = GP_KERB_DEPTH
+            d = KERB_DEPTH
             # Right turns (sign > 0) have side_a on the inside; inward normals point at the centerline.
             for side, inside, (nx, ny) in (
                 (side_a, sign > 0, (ty, -tx)),
@@ -381,7 +444,7 @@ class Track:
                 p0, p1 = side[i], side[(i + 1) % n]
                 q0 = (p0[0] + nx * d, p0[1] + ny * d)
                 q1 = (p1[0] + nx * d, p1[1] + ny * d)
-                color = KERB_RED if (i // GP_KERB_BLOCK_SAMPLES) % 2 == 0 else KERB_WHITE
+                color = KERB_RED if (i // KERB_BLOCK_SAMPLES) % 2 == 0 else KERB_WHITE
                 self._decor.append((*_strip([(p0, q0), (p1, q1)]), color))
 
         # Checkered start/finish line across gate 0.
@@ -451,11 +514,10 @@ class Track:
         return False
 
     def render(self) -> None:
-        """Draw the track surface (Grand Prix only) and boundaries."""
-        if self._asphalt is not None:
-            rl.DrawTriangleStrip(self._asphalt[0], self._asphalt[1], ASPHALT_COLOR)
-            for arr, count, color in self._decor:
-                rl.DrawTriangleStrip(arr, count, color)
+        """Draw the asphalt, kerbs, start line and boundaries."""
+        rl.DrawTriangleStrip(self._asphalt[0], self._asphalt[1], ASPHALT_COLOR)
+        for arr, count, color in self._decor:
+            rl.DrawTriangleStrip(arr, count, color)
 
         line_thick = 3.0
         line_color = colors.WHITE
@@ -464,6 +526,47 @@ class Track:
             start = [float(p1[0]), float(p1[1])]
             end = [float(p2[0]), float(p2[1])]
             rl.DrawLineEx(start, end, line_thick, line_color)
+
+    def racing_line(
+        self, max_speed: float, turn_rate: float, accel: float, brake: float
+    ) -> tuple[list[Segment], list[tuple[int, int, int, int]], float]:
+        """Minimum-curvature line colored by the car's achievable speed, plus its ideal lap time.
+
+        Computed on first use per layout (about a second) and cached.
+        """
+        if self._racing_line is None:
+            center, tangents, widths = self._centerline
+            step = max(1, round(RACING_LINE_SPACING / SAMPLE_STEP))
+            idx = range(0, len(center), step)
+            line = _min_curvature_line(
+                [center[i] for i in idx],
+                [(-tangents[i][1], tangents[i][0]) for i in idx],
+                [max(0.0, widths[i] * 0.5 - RACING_LINE_MARGIN) for i in idx],
+            )
+            v = _speed_profile(line, max_speed, turn_rate, accel, brake)
+            v_lo, v_hi = min(v), max(v)
+            segs, cols = [], []
+            lap_time = 0.0
+            for i in range(len(line)):
+                j = (i + 1) % len(line)
+                segs.append((line[i], line[j]))
+                t = (0.5 * (v[i] + v[j]) - v_lo) / max(1e-9, v_hi - v_lo)
+                cols.append(
+                    _lerp_color(RACING_LINE_SLOW, RACING_LINE_MID, t * 2.0)
+                    if t < 0.5
+                    else _lerp_color(RACING_LINE_MID, RACING_LINE_FAST, t * 2.0 - 1.0)
+                )
+                lap_time += math.dist(line[i], line[j]) / max(1e-9, 0.5 * (v[i] + v[j]))
+            self._racing_line = (segs, cols, lap_time)
+        return self._racing_line
+
+    def render_racing_line(
+        self, max_speed: float, turn_rate: float, accel: float, brake: float
+    ) -> None:
+        """Draw the racing line: red where the car must be slow, green where it can be flat out."""
+        segs, cols, _ = self.racing_line(max_speed, turn_rate, accel, brake)
+        for ((x1, y1), (x2, y2)), color in zip(segs, cols):
+            rl.DrawLineEx([x1, y1], [x2, y2], 2.5, color)
 
     def render_checkpoints(self) -> None:
         """Draw checkpoint gate segments (toggle in sim)."""

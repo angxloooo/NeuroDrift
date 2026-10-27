@@ -6,9 +6,9 @@ import math
 import torch
 from raylib import ffi, rl, colors
 
-from .car import Car
-from .ga_agent import HIDDEN_DIM, PopulationManager
-from .track import Track
+from .car import CONTROL_LABELS, SENSOR_ANGLES, SENSOR_LABELS, Car
+from .ga_agent import ACTION_DIM, HIDDEN_DIM, PopulationManager
+from .track import Track, segment_hit
 
 
 SCREEN_WIDTH = 1450
@@ -23,16 +23,22 @@ MAX_GENERATION_STEPS = 2500
 POPULATION_SIZE = 100
 
 # --- Strict fitness economy (only checkpoint/lap gains; heavy drains elsewhere) ---
+# A car retires (frozen, fitness kept) when it hits a wall or stalls past the starvation band.
+# Without this, a crashed car keeps draining every frame, so parking at the start beats trying
+# a corner and the population converges on not moving.
 FITNESS_CHECKPOINT_REWARD = 130.0
 FITNESS_LAP_REWARD = 380.0
 # Small tax every frame so “existing” in the sim is never free.
 FITNESS_BASE_COST_PER_FRAME = 1.25
-# No checkpoint for this long → extra drain per frame (on top of base cost).
+# No checkpoint for this long → extra drain per frame (on top of base cost); past the band → retire.
 STARVATION_GRACE_FRAMES = 30
 STARVATION_DRAIN_TIER1 = 38.0  # frames in (grace, grace + 60]
-STARVATION_DRAIN_TIER2 = 115.0  # frames after tier1 band
 STARVATION_TIER1_WIDTH = 60
+STALL_RETIRE_FRAMES = STARVATION_GRACE_FRAMES + STARVATION_TIER1_WIDTH
+# One-off cost for the frame a car hits the wall (and retires).
 FITNESS_WALL_DRAIN_PER_FRAME = 125.0
+# When a run ends, credit the fraction of the way to the next gate (x checkpoint reward) so
+# selection can tell a car that got deep into a corner from one that crashed at its entry.
 
 # Checkpoint gates: require motion aligned with the race direction; cap multi-hits / frame.
 CHECKPOINT_MIN_FORWARD_FRAC = 0.28  # dot(move, tangent) >= frac * |move|
@@ -46,23 +52,24 @@ CHECKPOINT_FITNESS_INTERVAL = 1
 COLOR_PROGRESS_GATE_WEIGHT = 10000.0
 
 _ELITE_COLOR = getattr(colors, "WHITE", (255, 255, 255, 255))
+_RETIRED_COLOR = (110, 110, 110, 255)
 FITNESS_HUE_MAX = 0.65
 
 
 def _starvation_extra_per_frame(frames_since_checkpoint: int) -> float:
-    """Escalating penalty for not hitting the next checkpoint; 0 during grace."""
-    fs = frames_since_checkpoint
-    if fs <= STARVATION_GRACE_FRAMES:
+    """Penalty for not hitting the next checkpoint; 0 during grace (car retires after the band)."""
+    if frames_since_checkpoint <= STARVATION_GRACE_FRAMES:
         return 0.0
-    end_tier1 = STARVATION_GRACE_FRAMES + STARVATION_TIER1_WIDTH
-    if fs <= end_tier1:
-        return STARVATION_DRAIN_TIER1
-    return STARVATION_DRAIN_TIER2
+    return STARVATION_DRAIN_TIER1
 
 
 def _car_color_progress_score(car: Car) -> float:
     """Monotonic race-ish signal: discrete gates + continuous odometer (updates each frame)."""
     return float(car.total_gates_crossed) * COLOR_PROGRESS_GATE_WEIGHT + car.total_distance_traveled
+
+
+def _credit_partial_gate(car: Car, track: Track) -> None:
+    car.fitness += FITNESS_CHECKPOINT_REWARD * track.gate_progress(car.position, car.target_checkpoint)
 
 
 def _apply_strict_fitness_penalties(car: Car, *, touching_wall: bool) -> None:
@@ -137,6 +144,7 @@ def _draw_ui_sidebar(
     show_sensors: bool,
     show_checkpoints: bool,
     camera_follow: bool,
+    ideal_lap: float | None,
 ) -> None:
     """Left column UI: title, stats, controls, color legend."""
     x = 30
@@ -204,6 +212,9 @@ def _draw_ui_sidebar(
     cf_on = "ON" if camera_follow else "OFF"
     rl.DrawText(f"[Space] - Camera Follow ({cf_on})".encode(), x, y, 16, colors.RAYWHITE)
     y += 35
+    rl_on = f"ON, ideal lap {ideal_lap:.1f}s" if ideal_lap is not None else "OFF"
+    rl.DrawText(f"[L] - Racing Line ({rl_on})".encode(), x, y, 16, colors.RAYWHITE)
+    y += 35
     _draw_sidebar_separator(x, y, sep_w)
     y += 35
 
@@ -222,12 +233,12 @@ def _draw_brain_cam_key() -> None:
     entries: list[tuple[bytes, int, object]] = [
         (b"Brain Cam Key", 18, colors.SKYBLUE),
         (b"Yellow: Inputs (Sensors + Speed)", 16, colors.RAYWHITE),
-        (b"  L / DL / F / DR / R = Five Sensors", 16, colors.RAYWHITE),
+        (f"  L90 ... R90 = {len(SENSOR_ANGLES)} Sensors (deg off nose)".encode(), 16, colors.RAYWHITE),
         (b"  SPD = Speed (Normalized)", 16, colors.RAYWHITE),
         (f"Blue: Hidden Layer ({HIDDEN_DIM} Neurons)".encode(), 16, colors.RAYWHITE),
-        (b"Right: Outputs (A = Accel, B = Brake)", 16, colors.RAYWHITE),
-        (b"  L / S / R = Left / Straight / Right", 16, colors.RAYWHITE),
-        (b"Green Dot = Selected Action", 16, colors.RAYWHITE),
+        (b"Outputs: STEER (- left / + right)", 16, colors.RAYWHITE),
+        (b"  PEDAL (- brake / 0 coast / + gas)", 16, colors.RAYWHITE),
+        (b"Green = positive, Red = negative", 16, colors.RAYWHITE),
     ]
     total_h = line_step * len(entries)
     y = SCREEN_HEIGHT - margin - total_h
@@ -243,7 +254,6 @@ def _process_checkpoint_crossing(
     track: Track,
     old_x: float,
     old_y: float,
-    collision_point,
 ) -> None:
     """Award when movement crosses the next gate in race order (not grazing / wrong-way / hub chaining)."""
     n_ck = len(track.checkpoints)
@@ -257,16 +267,12 @@ def _process_checkpoint_crossing(
     move_len = math.sqrt(move_len_sq)
     min_forward = CHECKPOINT_MIN_FORWARD_FRAC * move_len
 
-    move_start = [old_x, old_y]
-    move_end = [float(car.position[0]), float(car.position[1])]
+    move_start = (old_x, old_y)
+    move_end = (float(car.position[0]), float(car.position[1]))
     awards = 0
     while awards < CHECKPOINT_MAX_AWARDS_PER_FRAME:
         p1, p2 = track.checkpoints[car.target_checkpoint]
-        seg_start = [float(p1[0]), float(p1[1])]
-        seg_end = [float(p2[0]), float(p2[1])]
-        if not rl.CheckCollisionLines(
-            move_start, move_end, seg_start, seg_end, collision_point
-        ):
+        if segment_hit(move_start, move_end, p1, p2) < 0.0:
             break
         tx, ty = track.checkpoint_tangents[car.target_checkpoint]
         if (dx * tx + dy * ty) < min_forward:
@@ -307,6 +313,7 @@ class Simulation:
         self.show_sensors = True
         self.generation_step = 0
         self.camera_follow = False
+        self.show_racing_line = False
 
     def _state_from_distances(
         self, sensor_distances: list[float], car: Car
@@ -331,17 +338,23 @@ class Simulation:
         state = self._state_from_distances(car.last_sensor_distances, car)
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            logits = brain(state_tensor)
-        action = int(torch.argmax(logits, dim=-1).item())
+            controls = brain(state_tensor)[0].tolist()
 
         layer_x = [start_x, start_x + 90, start_x + 180]
         hidden_step = 250 // max(1, HIDDEN_DIM - 1)
         edge_color = _fade(colors.WHITE, 0.28)
+        n_in = len(activations)
+        # All three columns share the hidden column's top and height.
+        column_top = start_y - 45
+        column_h = hidden_step * (HIDDEN_DIM - 1)
+        input_step = column_h / max(1, n_in - 1)
+        # Few analog outputs: spread them evenly inside the column rather than pinned to its ends.
+        output_step = column_h / (ACTION_DIM + 1)
 
-        for i in range(6):
-            iy = start_y + i * 35
+        for i in range(n_in):
+            iy = column_top + i * input_step
             for h in range(HIDDEN_DIM):
-                hy = start_y - 45 + h * hidden_step
+                hy = column_top + h * hidden_step
                 rl.DrawLine(
                     int(layer_x[0]),
                     int(iy),
@@ -351,9 +364,9 @@ class Simulation:
                 )
 
         for h in range(HIDDEN_DIM):
-            hy = start_y - 45 + h * hidden_step
-            for o in range(6):
-                oy = start_y + o * 35
+            hy = column_top + h * hidden_step
+            for o in range(ACTION_DIM):
+                oy = column_top + (o + 1) * output_step
                 rl.DrawLine(
                     int(layer_x[1]),
                     int(hy),
@@ -362,27 +375,20 @@ class Simulation:
                     edge_color,
                 )
 
-        input_labels = [b"L", b"DL", b"F", b"DR", b"R", b"SPD"]
-        output_labels = [
-            b"A+L",
-            b"A+S",
-            b"A+R",
-            b"B+L",
-            b"B+S",
-            b"B+R",
-        ]
+        input_labels = SENSOR_LABELS + [b"SPD"]
+        output_labels = CONTROL_LABELS
 
-        for i in range(6):
-            iy = start_y + i * 35
+        for i in range(n_in):
+            iy = column_top + i * input_step
             act = max(0.0, min(1.0, activations[i]))
             color = _fade(colors.YELLOW, act) if act > 0.1 else colors.DARKGRAY
-            rl.DrawCircle(int(layer_x[0]), int(iy), 10, color)
-            rl.DrawCircleLines(int(layer_x[0]), int(iy), 10, colors.LIGHTGRAY)
+            rl.DrawCircle(int(layer_x[0]), int(iy), 9, color)
+            rl.DrawCircleLines(int(layer_x[0]), int(iy), 9, colors.LIGHTGRAY)
             rl.DrawText(input_labels[i], int(layer_x[0]) - 35, int(iy) - 5, 10, colors.LIGHTGRAY)
 
         avg_act = sum(activations) / len(activations)
         for h in range(HIDDEN_DIM):
-            hy = start_y - 45 + h * hidden_step
+            hy = column_top + h * hidden_step
             rl.DrawCircle(
                 int(layer_x[1]),
                 int(hy),
@@ -390,14 +396,15 @@ class Simulation:
                 _fade(colors.SKYBLUE, avg_act * 0.8 + 0.2),
             )
 
-        for o in range(6):
-            oy = start_y + o * 35
-            color = colors.GREEN if o == action else colors.DARKGRAY
-            rl.DrawCircle(int(layer_x[2]), int(oy), 10, color)
-            rl.DrawCircleLines(int(layer_x[2]), int(oy), 10, colors.LIGHTGRAY)
+        for o in range(ACTION_DIM):
+            oy = column_top + (o + 1) * output_step
+            value = controls[o]
+            color = _fade(colors.GREEN if value >= 0 else colors.RED, abs(value) * 0.85 + 0.15)
+            rl.DrawCircle(int(layer_x[2]), int(oy), 12, color)
+            rl.DrawCircleLines(int(layer_x[2]), int(oy), 12, colors.LIGHTGRAY)
             rl.DrawText(
-                output_labels[o],
-                int(layer_x[2]) + 15,
+                output_labels[o] + f" {value:+.2f}".encode(),
+                int(layer_x[2]) + 18,
                 int(oy) - 5,
                 10,
                 colors.LIGHTGRAY,
@@ -416,6 +423,8 @@ class Simulation:
                 self.show_checkpoints = not self.show_checkpoints
             if rl.IsKeyPressed(rl.KEY_SPACE):
                 self.camera_follow = not self.camera_follow
+            if rl.IsKeyPressed(rl.KEY_L):
+                self.show_racing_line = not self.show_racing_line
 
             manual_shift = 0
             if rl.IsKeyPressed(rl.KEY_RIGHT):
@@ -434,36 +443,37 @@ class Simulation:
                 self.generation += 1
                 self.generation_step = 0
 
-            collision_pt = ffi.new("struct Vector2 *")
             for idx, car in enumerate(self.population.cars):
+                if car.retired:
+                    continue
                 sensor_distances = car.get_sensor_distances(self.track)
                 state = self._state_from_distances(sensor_distances, car)
                 state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
                 brain = self.population.brains[idx]
                 with torch.no_grad():
-                    logits = brain(state_tensor)
-                    action = int(logits.argmax(dim=-1).item())
+                    steer, pedal = brain(state_tensor)[0].tolist()
 
                 old_x = float(car.position[0])
                 old_y = float(car.position[1])
                 safe_pos = list(car.position)
-                car.apply_action(action, dt=FIXED_PHYSICS_DT)
+                car.apply_action(steer, pedal, dt=FIXED_PHYSICS_DT)
 
-                _process_checkpoint_crossing(
-                    car, self.track, old_x, old_y, collision_pt
-                )
+                _process_checkpoint_crossing(car, self.track, old_x, old_y)
 
                 car.frames_since_checkpoint += 1
 
                 hit = self.track.check_car_collision(car)
                 if hit:
                     car.position = safe_pos
-                    car.velocity *= 0.5
+                    car.velocity = 0.0
                     car.is_touching_wall = True
                 else:
                     car.is_touching_wall = False
 
                 _apply_strict_fitness_penalties(car, touching_wall=hit)
+                if hit or car.frames_since_checkpoint > STALL_RETIRE_FRAMES:
+                    car.retired = True
+                    _credit_partial_gate(car, self.track)
 
                 car.total_distance_traveled += math.hypot(
                     float(car.position[0]) - old_x,
@@ -471,7 +481,11 @@ class Simulation:
                 )
 
             self.generation_step += 1
-            if self.generation_step >= MAX_GENERATION_STEPS:
+            all_retired = all(c.retired for c in self.population.cars)
+            if self.generation_step >= MAX_GENERATION_STEPS or all_retired:
+                for car in self.population.cars:
+                    if not car.retired:
+                        _credit_partial_gate(car, self.track)
                 spawn_pos, spawn_angle = self.track.get_spawn_info(self.track.spawn_checkpoint)
                 self.last_gen_best_fitness = self.population.evolve_and_reset(
                     spawn_pos, spawn_angle
@@ -517,11 +531,22 @@ class Simulation:
             rl.ClearBackground(colors.DARKGRAY)
             rl.BeginMode2D(camera[0])
             self.track.render()
+            car0 = self.population.cars[0]
+            line_physics = (
+                car0.base_max_speed,
+                car0.turn_rate,
+                car0.base_acceleration,
+                car0.brake_deceleration,
+            )
+            if self.show_racing_line:
+                self.track.render_racing_line(*line_physics)
             if self.show_checkpoints:
                 self.track.render_checkpoints()
             for idx, car in enumerate(self.population.cars):
                 if car is best_car:
                     body = colors.MAGENTA
+                elif car.retired:
+                    body = _RETIRED_COLOR
                 elif idx in self.population.elite_indices:
                     body = _ELITE_COLOR
                 else:
@@ -530,7 +555,7 @@ class Simulation:
                     )
                 car.render(
                     body_color=body,
-                    show_sensors=self.show_sensors,
+                    show_sensors=self.show_sensors and not car.retired,
                 )
             rl.EndMode2D()
             steps_left = max(0, MAX_GENERATION_STEPS - self.generation_step)
@@ -545,6 +570,9 @@ class Simulation:
                 show_sensors=self.show_sensors,
                 show_checkpoints=self.show_checkpoints,
                 camera_follow=self.camera_follow,
+                ideal_lap=(
+                    self.track.racing_line(*line_physics)[2] if self.show_racing_line else None
+                ),
             )
 
             if best_car and best_brain:
