@@ -34,11 +34,13 @@ STARVATION_DRAIN_TIER2 = 115.0  # frames after tier1 band
 STARVATION_TIER1_WIDTH = 60
 FITNESS_WALL_DRAIN_PER_FRAME = 125.0
 
-# Checkpoint gates: require motion aligned with CCW track direction; cap multi-hits / frame.
+# Checkpoint gates: require motion aligned with the race direction; cap multi-hits / frame.
 CHECKPOINT_MIN_FORWARD_FRAC = 0.28  # dot(move, tangent) >= frac * |move|
 CHECKPOINT_MAX_AWARDS_PER_FRAME = 2
 # Fitness only every N sequential gate crossings (still advance target every crossing).
-CHECKPOINT_FITNESS_INTERVAL = 20
+# Keep this small: if the first payout lies past a hard corner (e.g. Grand Prix T1 at gate ~6),
+# cars that make the corner score the same as cars that crash and evolution stalls.
+CHECKPOINT_FITNESS_INTERVAL = 1
 
 # Body color: gates dominate ordering; path length updates every frame for smooth hue changes.
 COLOR_PROGRESS_GATE_WEIGHT = 10000.0
@@ -128,6 +130,7 @@ def _draw_ui_sidebar(
     generation: int,
     population_size: int,
     track_shape: int,
+    track_name: str,
     best_fitness: float,
     steps_left: int,
     max_steps: int,
@@ -156,7 +159,7 @@ def _draw_ui_sidebar(
     )
     y += 35
     rl.DrawText(
-        f"Track Mode: {track_shape}".encode(),
+        f"Track Mode: {track_shape} ({track_name})".encode(),
         x,
         y,
         18,
@@ -235,20 +238,6 @@ def _draw_brain_cam_key() -> None:
         y += line_step
 
 
-def _checkpoint_ccw_tangent(track: Track, k: int) -> tuple[float, float]:
-    """Unit vector along CCW race direction at checkpoint k (perpendicular to gate radius)."""
-    cx, cy = track.center
-    (i1, i2) = track.checkpoints[k]
-    mx = (float(i1[0]) + float(i2[0])) * 0.5
-    my = (float(i1[1]) + float(i2[1])) * 0.5
-    rx, ry = mx - cx, my - cy
-    tx, ty = -ry, rx
-    n = math.hypot(tx, ty)
-    if n < 1e-9:
-        return (1.0, 0.0)
-    return (tx / n, ty / n)
-
-
 def _process_checkpoint_crossing(
     car: Car,
     track: Track,
@@ -256,7 +245,7 @@ def _process_checkpoint_crossing(
     old_y: float,
     collision_point,
 ) -> None:
-    """Award when movement crosses the next gate in CCW order (not grazing / wrong-way / hub chaining)."""
+    """Award when movement crosses the next gate in race order (not grazing / wrong-way / hub chaining)."""
     n_ck = len(track.checkpoints)
     if n_ck == 0:
         return
@@ -279,7 +268,7 @@ def _process_checkpoint_crossing(
             move_start, move_end, seg_start, seg_end, collision_point
         ):
             break
-        tx, ty = _checkpoint_ccw_tangent(track, car.target_checkpoint)
+        tx, ty = track.checkpoint_tangents[car.target_checkpoint]
         if (dx * tx + dy * ty) < min_forward:
             break
         car.frames_since_checkpoint = 0
@@ -300,12 +289,11 @@ class Simulation:
 
     def __init__(self):
         self.track = Track()
-        self.start_ck = (3 * self.track.num_segments) // 4
-        spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
+        spawn_pos, spawn_angle = self.track.get_spawn_info(self.track.spawn_checkpoint)
         car_kwargs = {
             "max_speed": MAX_SPEED,
             "sensor_range": SENSOR_RANGE,
-            "spawn_target_checkpoint": self.start_ck,
+            "spawn_target_checkpoint": self.track.spawn_checkpoint,
         }
         self.population = PopulationManager(
             population_size=POPULATION_SIZE,
@@ -437,7 +425,9 @@ class Simulation:
 
             if manual_shift != 0:
                 self.track.set_shape(self.track.current_shape + manual_shift)
-                spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
+                for car in self.population.cars:
+                    car.spawn_target_checkpoint = self.track.spawn_checkpoint
+                spawn_pos, spawn_angle = self.track.get_spawn_info(self.track.spawn_checkpoint)
                 self.last_gen_best_fitness = self.population.evolve_and_reset(
                     spawn_pos, spawn_angle
                 )
@@ -482,7 +472,7 @@ class Simulation:
 
             self.generation_step += 1
             if self.generation_step >= MAX_GENERATION_STEPS:
-                spawn_pos, spawn_angle = self.track.get_spawn_info(self.start_ck)
+                spawn_pos, spawn_angle = self.track.get_spawn_info(self.track.spawn_checkpoint)
                 self.last_gen_best_fitness = self.population.evolve_and_reset(
                     spawn_pos, spawn_angle
                 )
@@ -548,6 +538,7 @@ class Simulation:
                 generation=self.generation,
                 population_size=len(self.population.cars),
                 track_shape=self.track.current_shape,
+                track_name=self.track.shape_name,
                 best_fitness=self.last_gen_best_fitness,
                 steps_left=steps_left,
                 max_steps=MAX_GENERATION_STEPS,

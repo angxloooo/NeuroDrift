@@ -5,7 +5,7 @@ A 2D top-down driving environment built with **Raylib**, where a population of s
 ## What you’ll see
 
 - **Many cars** driving at once, each controlled by its own neural network.
-- A **HUD** with generation count, population size, track shape index, best fitness from the **previous** generation, and steps remaining in the current generation.
+- A **HUD** with generation count, population size, track shape index and name, best fitness from the **previous** generation, and steps remaining in the current generation.
 - **Body colors** that reflect race progress (gates plus distance); **white** cars are **elites** carried over unchanged; the current **leader** is highlighted in **magenta**.
 - **Brain Cam**: a live diagram of the leading car’s network (inputs, hidden layer, argmax action).
 - Optional **sensor rays**, **checkpoint lines**, and **camera follow** zoomed on the leader.
@@ -48,7 +48,7 @@ Car movement uses a **fixed integration step** of **1/60 second** (`FIXED_PHYSIC
 |-----|--------|
 | **S** | Toggle **sensor** rays (5 directions, distance to track boundary) |
 | **C** | Toggle **checkpoint** segments (radial gates around the track) |
-| **← / →** | **Previous / next track shape** (three procedural layouts). Changing track re-runs evolution from the current spawn. |
+| **← / →** | **Previous / next track shape** (three procedural rings plus the Grand Prix circuit). Changing track re-runs evolution from the current spawn. |
 | **Space** | **Camera follow**: on = zoomed view centered on the fitness **leader**; off = full track view |
 
 Raylib also draws **FPS** in the corner.
@@ -90,13 +90,18 @@ Fitness is **not** only “go fast”: it is a **strict economy** tuned in `src/
 - **Per-frame cost** so simply existing in the sim always drains fitness.
 - **Starvation**: if the car goes too long without clearing the **next** checkpoint in order, extra drain kicks in after a short grace period (tiered).
 - **Wall contact**: per-frame fitness drain for each frame the car stays touching the boundary (`FITNESS_WALL_DRAIN_PER_FRAME`).
-- **Rewards** come from advancing along **checkpoints in CCW order**. You must cross the next gate with enough **forward motion aligned** with the track direction; multiple gate hits per frame are capped. Checkpoint **score** is granted in **batches** every **20** gate crossings (`CHECKPOINT_FITNESS_INTERVAL`); completing a full lap adds a **lap bonus**.
+- **Rewards** come from advancing along **checkpoints in race order**. You must cross the next gate with enough **forward motion aligned** with the track direction; multiple gate hits per frame are capped. Checkpoint **score** is granted on **every** gate crossing (`CHECKPOINT_FITNESS_INTERVAL` = 1; larger values batch it, which stalls learning when the first payout sits past a hard corner); completing a full lap adds a **lap bonus**.
 
 Exact numbers (costs, rewards, grace frames, etc.) live next to the `FITNESS_*` and `CHECKPOINT_*` constants at the top of `src/simulation.py`.
 
 ## Track
 
-The track is a **ring** between an outer and inner boundary (ellipses approximated by segments). **Checkpoints** are radial segments at regular angular steps. Three **shape presets** warp the boundary (sinusoidal radial offsets) for variety; index **0–2** is shown in the HUD as “Track Mode”.
+Four layouts are available; the index and name are shown in the HUD as “Track Mode”. The sim starts on **3 (Grand Prix)**.
+
+- **0–2 (Oval, Peanut, Clover)**: a **ring** between an outer and inner boundary (ellipses approximated by segments, warped by sinusoidal radial offsets). **Checkpoints** are radial segments at regular angular steps.
+- **3 (Grand Prix)**: a closed circuit laid out the way F1 tracks are: a polygon whose corners are rounded with circular arcs (`GP_CORNERS` in `src/track.py`, each entry is `x, y, corner radius, track width`). Corner radii are sized against the car's handling, so there is a real mix: flat-out sweepers, medium-speed esses, slow corners (T1, the hairpin, the chicane) that each sit at the end of a straight and need a braking zone. Track width blends between corners and runs wider into the heavy braking zones and the hairpin. Checkpoints are gates perpendicular to the centerline, evenly spaced along it, starting at the start/finish line on the main straight. The surface is drawn with asphalt, red/white kerbs, and a checkered start line; walls are simplified from the offset curves for collision and sensors.
+
+Sensors and collision only test boundary segments in nearby cells of a uniform grid (`Track.segments_near`), so the more detailed Grand Prix walls cost about the same per frame as the rings.
 
 Collision uses the car as a **rotated box** against boundary segments (`Track.check_car_collision`). On impact the sim **reverts** the car to its pre-step position, **halves velocity** (× 0.5), and **fitness** takes the configured **per-frame wall drain** for as long as the car stays in contact (`FITNESS_WALL_DRAIN_PER_FRAME` in `src/simulation.py`).
 
@@ -111,7 +116,7 @@ NeuroDrift/
     ├── __init__.py      # Package exports
     ├── simulation.py    # Main loop, fitness, UI, Brain Cam, camera
     ├── car.py             # Physics, sensors, rendering
-    ├── track.py           # Geometry, checkpoints, collision, drawing
+    ├── track.py           # Layouts (rings + Grand Prix), checkpoints, collision, drawing
     └── ga_agent.py        # Brain MLP, population, mutation, evolve
 ```
 

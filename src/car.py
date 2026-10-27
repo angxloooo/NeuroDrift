@@ -44,7 +44,7 @@ class Car:
         self.radius = radius
         self.length = length
         self.fitness = 0.0
-        self._default_target_checkpoint = spawn_target_checkpoint
+        self.spawn_target_checkpoint = spawn_target_checkpoint
         self.target_checkpoint = spawn_target_checkpoint
         self.frames_since_checkpoint = 0
         self.checkpoints_since_fitness_reward = 0
@@ -58,6 +58,7 @@ class Car:
         ray_start_x = cx
         ray_start_y = cy
 
+        nearby = track.segments_near(cx, cy, self.sensor_range)
         distances = []
         for deg in SENSOR_ANGLES:
             rad = math.radians(deg) + self.angle
@@ -70,7 +71,7 @@ class Car:
             min_dist = self.sensor_range
             collision_point = ffi.new("struct Vector2 *")
 
-            for (p1, p2) in track.get_boundary_segments():
+            for (p1, p2) in nearby:
                 seg_p1 = [float(p1[0]), float(p1[1])]
                 seg_p2 = [float(p2[0]), float(p2[1])]
                 if rl.CheckCollisionLines(ray_start, ray_end, seg_p1, seg_p2, collision_point):
@@ -123,7 +124,7 @@ class Car:
         self.is_touching_wall = False
         self.active_max_speed = self.base_max_speed
         self.active_acceleration = self.base_acceleration
-        self.target_checkpoint = self._default_target_checkpoint
+        self.target_checkpoint = self.spawn_target_checkpoint
         self.frames_since_checkpoint = 0
         self.checkpoints_since_fitness_reward = 0
         self.total_gates_crossed = 0
